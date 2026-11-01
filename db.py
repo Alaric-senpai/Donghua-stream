@@ -102,6 +102,12 @@ def init_schema():
                     UNIQUE(series_id, video_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_episodes_series_id ON episodes(series_id);
                 CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(status);
                 CREATE INDEX IF NOT EXISTS idx_series_key ON series(key);
@@ -531,6 +537,57 @@ def delete_episode(episode_id: int) -> bool:
             cur.execute("DELETE FROM episodes WHERE id = %s", (episode_id,))
         conn.commit()
     return True
+
+
+# ==============================================================================
+# Settings Operations
+# ==============================================================================
+
+DEFAULT_SETTINGS = {
+    "global_save_dir": os.path.expanduser("~/Videos"),
+    "default_quality": "720p",
+    "browser_cookies": "brave",
+    "max_retries": "3",
+}
+
+
+def get_setting(key: str, default: Optional[str] = None) -> str:
+    """Retrieve an application setting from PostgreSQL or default."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+    return default if default is not None else DEFAULT_SETTINGS.get(key, "")
+
+
+def set_setting(key: str, value: str) -> bool:
+    """Save or update an application setting in PostgreSQL."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP;
+                """,
+                (key, str(value)),
+            )
+        conn.commit()
+    return True
+
+
+def get_all_settings() -> Dict[str, str]:
+    """Retrieve all application settings as a dictionary."""
+    result = dict(DEFAULT_SETTINGS)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT key, value FROM app_settings;")
+            for k, v in cur.fetchall():
+                result[k] = v
+    return result
 
 
 def get_db_stats() -> Dict[str, int]:
