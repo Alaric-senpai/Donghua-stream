@@ -38,3 +38,6 @@ py-modules = ["script", "db", "downloader", "urls"]
 
 [tool.setuptools.packages.find]
 include = ["gui", "gui.*"]
+
+[tool.setuptools.package-data]
+gui = ["assets/icons/*.svg"]

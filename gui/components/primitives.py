@@ -1,4 +1,6 @@
-"""Tokens-driven visual primitives used by every page and dialog."""
+"""Tokens-driven visual primitives shared by every page and dialog."""
+from typing import Tuple
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
@@ -7,14 +9,16 @@ from PyQt6.QtWidgets import (
 )
 
 from ..theme import (
-    T_AMBER, T_CARD, T_EMERALD, T_EMERALD2, T_MUTED, T_ON_PRIMARY,
-    T_PRIMARY, T_ROSE, T_SEC,
+    T_AMBER2, T_AMBER_LINE, T_AMBER_SOFT, T_CARD_SOFT, T_EMERALD2,
+    T_EMERALD_LINE, T_EMERALD_SOFT, T_LINE, T_MUTED,
+    T_ON_PRIMARY, T_PRIMARY, T_PRIMARY_LINE, T_PRIMARY_SOFT, T_ROSE2,
+    T_ROSE_LINE, T_ROSE_SOFT, T_SEC,
 )
 
 
 def mk_label(text: str = "", cls: str = "", color_name: str = "",
              wrap: bool = False) -> QLabel:
-    """Styled label: cls is one of titleXl/titleLg/titleMd/titleSm/body/small."""
+    """Styled label: cls is one of display/titleXl/titleLg/titleMd/titleSm/body/small."""
     lab = QLabel(text)
     if cls:
         lab.setObjectName(cls)
@@ -28,26 +32,36 @@ def mk_label(text: str = "", cls: str = "", color_name: str = "",
 
 def label_caps(text: str) -> QLabel:
     lab = QLabel(text.upper())
-    lab.setStyleSheet(
-        f"color: {T_MUTED}; font-size: 11px; font-weight: 700; letter-spacing: 1.2px;"
-    )
+    lab.setObjectName("labelCaps")
+    return lab
+
+
+def eyebrow(text: str) -> QLabel:
+    lab = QLabel(text.upper())
+    lab.setObjectName("eyebrow")
+    return lab
+
+
+def mono_label(text: str = "") -> QLabel:
+    lab = QLabel(text)
+    lab.setObjectName("mono")
     return lab
 
 
 def chip_tag(text: str, tone: str = "default") -> QLabel:
     tones = {
-        "default": (T_CARD, "#33415588", T_SEC),
-        "sky": ("#38bdf833", "#38bdf877", T_PRIMARY),
-        "emerald": ("#10b98122", "#10b98166", T_EMERALD2),
-        "amber": ("#f59e0b22", "#f59e0b66", "#fcd34d"),
-        "rose": ("#f43f5e22", "#f43f5e66", "#fda4af"),
+        "default": (T_CARD_SOFT, T_LINE, T_SEC),
+        "sky": (T_PRIMARY_SOFT, T_PRIMARY_LINE, T_PRIMARY),
+        "emerald": (T_EMERALD_SOFT, T_EMERALD_LINE, T_EMERALD2),
+        "amber": (T_AMBER_SOFT, T_AMBER_LINE, T_AMBER2),
+        "rose": (T_ROSE_SOFT, T_ROSE_LINE, T_ROSE2),
         "primary": (T_PRIMARY, T_PRIMARY, T_ON_PRIMARY),
     }
     bg, border, fg = tones.get(tone, tones["default"])
     lab = QLabel(text)
     lab.setStyleSheet(
-        f"background: {bg}; border: 1px solid {border}; border-radius: 999px;"
-        f"color: {fg}; font-size: 11px; font-weight: 700; padding: 2px 10px;"
+        f"background: {bg}; border: 1px solid {border}; border-radius: 8px;"
+        f"color: {fg}; font-size: 10px; font-weight: 700; padding: 2px 8px;"
     )
     lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
     return lab
@@ -56,19 +70,20 @@ def chip_tag(text: str, tone: str = "default") -> QLabel:
 def btn(text: str, kind: str = "ghost", tip: str = "", small: bool = False) -> QPushButton:
     b = QPushButton(text)
     b.setObjectName(kind if kind in ("primary", "ghost", "danger", "success", "chip") else "ghost")
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
     if tip:
         b.setToolTip(tip)
-    if small:
-        b.setFixedHeight(28)
-    else:
-        b.setMinimumHeight(38)
+    b.setFixedHeight(32 if small else 38)
     return b
 
 
-def icon_btn(symbol: str, tip: str = "") -> QPushButton:
-    b = QPushButton(symbol, )
+def icon_btn(symbol: str, tip: str = "", danger: bool = False) -> QPushButton:
+    b = QPushButton(symbol)
     b.setObjectName("iconBtn")
     b.setFixedSize(30, 30)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    if danger:
+        b.setProperty("danger", True)
     if tip:
         b.setToolTip(tip)
     return b
@@ -94,6 +109,7 @@ def styled_bar(color: str = "primary") -> QProgressBar:
     p = QProgressBar()
     p.setRange(0, 100)
     p.setTextVisible(False)
+    p.setFixedHeight(6)
     p.setObjectName({"emerald": "barGreen", "amber": "barAmber", "rose": "barRose"}.get(color, "barDefault"))
     return p
 
@@ -108,7 +124,21 @@ def set_shadow(w: QWidget, blur: int = 40, alpha: int = 160, dy: int = 10) -> No
 
 def _title_block(title: str, sub: str) -> QVBoxLayout:
     v = QVBoxLayout()
+    v.setSpacing(3)
     v.addWidget(mk_label(title, "titleLg"))
     v.addWidget(mk_label(sub, "body", "muted"))
     return v
 
+
+def heading_block(kicker: str, title: str, sub: str = "") -> Tuple[QWidget, QVBoxLayout]:
+    """Eyebrow + display title + supporting line, used at the top of pages."""
+    host = QWidget()
+    v = QVBoxLayout(host)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(2)
+    if kicker:
+        v.addWidget(eyebrow(kicker))
+    v.addWidget(mk_label(title, "display"))
+    if sub:
+        v.addWidget(mk_label(sub, "body", "muted"))
+    return host, v

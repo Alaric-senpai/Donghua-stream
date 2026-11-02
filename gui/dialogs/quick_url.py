@@ -16,7 +16,7 @@ class QuickUrlDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Quick Add URL")
         self.setStyleSheet(app_stylesheet())
-        self.setMinimumWidth(520)
+        self.setMinimumSize(540, 460)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 16)
         lay.setSpacing(10)

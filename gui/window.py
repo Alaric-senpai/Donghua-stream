@@ -2,7 +2,7 @@
 import os
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QStackedWidget,
@@ -19,12 +19,12 @@ from .infrastructure.db_worker import DbWorker
 from .infrastructure.download_queue import DownloadManager, DownloadTask
 from .infrastructure.size_scanner import SizeScanner
 from .infrastructure.thumbnails import ThumbnailStore
+from .motion import fade_in
 from .pages.detail import SeriesDetailView
 from .pages.downloads import DownloadsView
 from .pages.home import HomeView
 from .pages.library import LibraryView
 from .pages.settings import SettingsView
-from .theme import T_MUTED, T_RAIL
 from .utils import (
     URL_RE, disk_free, human_size, load_settings, pct, quality_label,
     set_setting,
@@ -67,7 +67,8 @@ class MainWindow(QMainWindow):
         shell.addWidget(col, 1)
 
         self.header = HeaderBar()
-        self.header.back_clicked.connect(lambda: self.navigateTo("home"))
+        self.header.set_quality_silent(self.settings.get("default_quality", "720p"))
+        self.header.back_clicked.connect(lambda: self.navigateTo("library"))
         self.header.search_submitted.connect(self._on_search)
         self.header.add_clicked.connect(self.open_wizard)
         self.header.quality_changed.connect(self._on_header_quality)
@@ -113,9 +114,7 @@ class MainWindow(QMainWindow):
 
         # ---- status strip (bottom per Stitch footer spec)
         strip = QFrame()
-        strip.setObjectName("card")
-        strip.setStyleSheet(f"QFrame#card {{ border-radius: 0px; background: {T_RAIL};"
-                            "border-top: 1px solid #28354d; }")
+        strip.setObjectName("statusStrip")
         strip.setFixedHeight(34)
         sl = QHBoxLayout(strip)
         sl.setContentsMargins(18, 4, 18, 4)
@@ -125,11 +124,11 @@ class MainWindow(QMainWindow):
         self.status_engine = QLabel("Engine: yt-dlp")
         self.status_state = QLabel("Status: Idle")
         for lab in (self.status_free, self.status_catalog, self.status_engine, self.status_state):
-            lab.setStyleSheet(f"color: {T_MUTED}; font-size: 11px;")
+            lab.setObjectName("small")
             sl.addWidget(lab)
         sl.addStretch(1)
         vers = QLabel("donghua-gui · PyQt6")
-        vers.setStyleSheet(f"color: {T_MUTED}; font-size: 11px;")
+        vers.setObjectName("small")
         sl.addWidget(vers)
         colv.addWidget(strip)
 
@@ -193,17 +192,22 @@ class MainWindow(QMainWindow):
         if key == "add":
             self.open_wizard()
             return
-        if key == "detail":
-            key = "detail"
-        self.stack.setCurrentIndex(self._page_by_key.get(key, 0))
+        idx = self._page_by_key.get(key, 0)
+        changed = self.stack.currentIndex() != idx
+        self.stack.setCurrentIndex(idx)
         self.sidebar.set_active({"home": "home", "library": "library",
                                  "downloads": "downloads", "settings": "settings"}.get(key, "home"))
         self.header.set_breadcrumb({
             "home": "Home", "library": "Library", "downloads": "Download Center",
             "settings": "Settings & Storage", "detail": "Library / Series",
         }.get(key, "Home"))
+        self.header.set_back_visible(key == "detail")
+        if changed:
+            fade_in(self.stack.currentWidget(), 150)
         if key == "downloads":
             self.downloads_view.on_state_changed()
+        elif key == "settings":
+            self.settings_view._update_disk_hint()
 
     def open_series(self, sid: int) -> None:
         self._detail_sid = sid
@@ -217,9 +221,15 @@ class MainWindow(QMainWindow):
                 return
             self._detail_vid = poster_map.get(sid, "")
             self.detail_view.load(series, self._detail_vid)
+            self.detail_view.set_quality_silent(
+                self.settings.get("default_quality", "720p"))
+            first_visit = self.stack.currentWidget() is not self.detail_view
             self.stack.setCurrentIndex(self._page_by_key["detail"])
             self.sidebar.set_active("library")
             self.header.set_breadcrumb(f"Library / {series.get('name', '')}")
+            self.header.set_back_visible(True)
+            if first_visit:
+                fade_in(self.detail_view, 150)
         self.run_db(lambda: (db.get_series(sid), db.get_series_poster_ids()), _loaded)
 
     # ---- data refresh ---------------------------------------------------------
@@ -272,10 +282,7 @@ class MainWindow(QMainWindow):
         self.home_view.update_poster(vid, pix)
         self.library_view.update_poster(vid, pix)
         if self._detail_vid == vid:
-            self.detail_view.poster.setPixmap(
-                pix.scaled(self.detail_view.poster.size(),
-                           Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                           Qt.TransformationMode.SmoothTransformation))
+            self.detail_view.set_poster(pix)
 
     # ---- search / quick add -----------------------------------------------------
     def _on_search(self, text: str) -> None:
@@ -441,7 +448,6 @@ class MainWindow(QMainWindow):
     def _delete_series(self, sid: int) -> None:
         s = next((x for x in self.home_view._all if x["id"] == sid), None)
         name = s["name"] if s else f"id {sid}"
-        from PyQt6.QtWidgets import QMessageBox
         if QMessageBox.question(
                 self, "Delete series",
                 f"Delete '{name}' and its episode registry?\nFiles on disk are NOT removed.") == \
@@ -493,6 +499,7 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self, key: str) -> None:
         self.settings = load_settings()
+        self.settings_view.s = dict(self.settings)
         if key in ("default_quality", "*"):
             self.header.set_quality_silent(self.settings.get("default_quality", "720p"))
         if key in ("global_save_dir", "*"):
@@ -502,7 +509,8 @@ class MainWindow(QMainWindow):
     def _on_header_quality(self, value: str) -> None:
         self.settings["default_quality"] = value
         set_setting("default_quality", value)
-        self.settings_view.s["default_quality"] = value
+        self.settings_view.set_default_quality(value)
+        self.detail_view.set_quality_silent(value)
         self.statusToast.show_message(f"Default quality set to {quality_label(value)}.", True)
 
     # ---- misc ------------------------------------------------------------

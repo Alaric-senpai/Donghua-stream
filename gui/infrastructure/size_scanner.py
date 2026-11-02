@@ -1,12 +1,12 @@
 """Background disk-usage scanner for series folders."""
 import os
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
 class SizeScanner(QThread):
-    scanned = pyqtSignal(int, int)   # series_id, bytes
+    scanned = pyqtSignal(int, object)   # series_id, bytes (Python int, no 32-bit overflow)
 
     def __init__(self, jobs: List[Tuple[int, str]], parent=None):
         super().__init__(parent)

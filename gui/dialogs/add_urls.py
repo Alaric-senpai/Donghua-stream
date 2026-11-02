@@ -1,10 +1,10 @@
 """Bulk-paste quick import drawer (`URL   # Episode title`)."""
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QGridLayout, QHBoxLayout, QSpinBox,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..components.primitives import btn, chip_tag, label_caps, mk_label
@@ -31,6 +31,7 @@ class AddUrlsDialog(QDialog):
                                "body", "muted"))
 
         self.urls = QTextEdit()
+        self.urls.setObjectName("codeInput")
         self.urls.setPlaceholderText(
             "https://youtu.be/XXXXXXXXX  # Episode 12 - The Divine Trail\nhttps://www.youtube.com/watch?v=YYYYYYYYY")
         self.urls.setMinimumHeight(180)
@@ -71,7 +72,7 @@ class AddUrlsDialog(QDialog):
         cancel.clicked.connect(self.reject)
         save = btn("💾  Save to Library Only", "ghost", "Register URLs without downloading")
         save.clicked.connect(lambda: self.done(1))
-        dl = btn("⤓  Save & Download Immediately", "primary", "Register and queue every URL")
+        dl = btn("⤓  Save and Download", "primary", "Register and queue every URL")
         dl.clicked.connect(lambda: self.done(2))
         btns.addWidget(cancel)
         btns.addWidget(save)
@@ -80,16 +81,18 @@ class AddUrlsDialog(QDialog):
 
         self._mode = None
         self._numbering = num_box
+        self._update_badge()
 
     def _update_badge(self) -> None:
         items = parse_bulk_urls(self.urls.toPlainText())
         dups = sum(1 for i in items if i["dup"])
         self.badge.setText(f"{len(items)} valid URLs  ·  {dups} duplicated  ·  {len(items) - dups} new")
+        ok = bool(items)
         self.badge.setStyleSheet(
-            f"background: {'#10b98122' if items else '#f43f5e22'};"
-            f"border: 1px solid {'#10b98166' if items else '#f43f5e66'};"
-            "border-radius: 999px; color: #4edea3; font-size: 11px; font-weight: 700;"
-            "padding: 2px 10px;")
+            f"background: {'rgba(16,185,129,26)' if ok else 'rgba(244,63,94,26)'};"
+            f"border: 1px solid {'rgba(16,185,129,105)' if ok else 'rgba(244,63,94,105)'};"
+            f"border-radius: 8px; color: {'#4edea3' if ok else '#fda4af'};"
+            "font-size: 10px; font-weight: 700; padding: 2px 8px;")
 
     def result_entries(self):
         return self._mode

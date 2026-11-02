@@ -1,23 +1,31 @@
-"""Series detail: identity, sync progress and the episode registry."""
+"""Series detail: identity, sync health and the episode registry."""
 import os
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QScrollArea, QSizePolicy, QSpinBox,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 import db
+from ..components.empty_state import EmptyState
 from ..components.episode_row import EpisodeRow
-from ..components.poster_grid import PosterGrid
 from ..components.primitives import (
-    btn, chip_tag, icon_btn, label_caps, mk_label, styled_bar,
+    btn, chip_tag, eyebrow, icon_btn, label_caps, mk_label, styled_bar, vline,
 )
+from ..components.stack_list import StackList
+from ..components.thumb import PosterThumb
 from ..dialogs.add_urls import AddUrlsDialog
+from ..icons import icon
 from ..infrastructure.thumbnails import ThumbnailStore
-from ..theme import T_MUTED, T_PRIMARY, T_ROSE, T_SEC, app_stylesheet
+from ..theme import (
+    T_AMBER2, T_AMBER_LINE, T_AMBER_SOFT, T_EMERALD2, T_EMERALD_LINE,
+    T_EMERALD_SOFT, T_ON_PRIMARY, T_PRIMARY, T_PRIMARY_LINE, T_PRIMARY_SOFT,
+    T_SEC, app_stylesheet,
+)
 from ..utils import QUALITY_OPTIONS, human_size, pct, resolve_path
 
 
@@ -40,108 +48,150 @@ class SeriesDetailView(QWidget):
         self._query = ""
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(28, 8, 28, 16)
+        root.setContentsMargins(28, 12, 28, 18)
         root.setSpacing(12)
 
-        # ---- top info card
+        # ---- identity + sync health
         info = QFrame()
         info.setObjectName("card")
+        info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         il = QHBoxLayout(info)
-        il.setContentsMargins(20, 18, 20, 18)
-        il.setSpacing(20)
+        il.setContentsMargins(18, 18, 18, 18)
+        il.setSpacing(18)
 
-        self.poster = QLabel()
-        self.poster.setFixedSize(240, 150)
-        self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.poster.setStyleSheet("border-radius: 12px; background: #122036;")
-        il.addWidget(self.poster)
+        self.poster = PosterThumb(thumbs, "", radius=12)
+        self.poster.setFixedSize(232, 145)
+        il.addWidget(self.poster, 0, Qt.AlignmentFlag.AlignTop)
 
         mid = QVBoxLayout()
-        mid.setSpacing(6)
+        mid.setSpacing(4)
         top = QHBoxLayout()
+        top.setSpacing(6)
         self.chip_eps = chip_tag("0 EPS", "sky")
         self.chip_status = chip_tag("", "emerald")
         top.addWidget(self.chip_eps)
         top.addWidget(self.chip_status)
         top.addStretch(1)
-        self.edit_btn = icon_btn("✎", "Edit series name / description / folder")
+        self.edit_btn = icon_btn("", "Edit series name / description / folder")
+        self.edit_btn.setIcon(icon("edit", T_SEC, 15))
+        self.edit_btn.setIconSize(QSize(15, 15))
         self.edit_btn.clicked.connect(self._edit_series)
         top.addWidget(self.edit_btn)
         mid.addLayout(top)
-        self.title = mk_label("—", "titleLg")
+        self.title = mk_label("—", "titleXl")
         mid.addWidget(self.title)
         self.sub = mk_label("", "body", "muted")
         mid.addWidget(self.sub)
-        tags = QHBoxLayout()
-        tags.setSpacing(6)
-        for tname in ("Donghua", "Ongoing"):
-            tags.addWidget(chip_tag(tname))
-        self.tags_row = tags
-        mid.addLayout(tags)
-
+        self.desc = mk_label("", "body")
+        self.desc.setWordWrap(True)
+        self.desc.setMaximumWidth(600)
+        self.desc.setMaximumHeight(36)
+        mid.addWidget(self.desc)
         path_row = QHBoxLayout()
+        path_row.setSpacing(8)
         self.path_lab = mk_label("", "codePill")
-        self.path_lab.setStyleSheet(f"color: {T_PRIMARY}; font-family: monospace; font-size: 12px;")
+        self.path_lab.setToolTip("Series save folder")
         path_row.addWidget(self.path_lab, 1)
-        openb = btn("⇗  Open in File Manager", "ghost", "")
-        openb.setMinimumHeight(30)
+        openb = btn("Open Folder", "ghost", "Reveal this series folder in the file manager",
+                    small=True)
+        openb.setIcon(icon("folder", T_SEC, 13))
+        openb.setIconSize(QSize(13, 13))
         openb.clicked.connect(lambda: self.open_folder.emit(self.series.get("save_dir", "")))
         path_row.addWidget(openb)
         mid.addLayout(path_row)
+
+        stats = QFrame()
+        stats.setObjectName("subtleBar")
+        stats.setFixedHeight(50)
+        sl = QHBoxLayout(stats)
+        sl.setContentsMargins(14, 5, 14, 5)
+        sl.setSpacing(16)
+        self.stat_total = self._stat_col(sl, "Episodes")
+        sl.addWidget(vline())
+        self.stat_ready = self._stat_col(sl, "Ready")
+        sl.addWidget(vline())
+        self.stat_pending = self._stat_col(sl, "Pending")
+        sl.addWidget(vline())
+        self.stat_failed = self._stat_col(sl, "Failed")
+        sl.addStretch(1)
+        mid.addWidget(stats)
+        mid.addStretch(1)
         il.addLayout(mid, 1)
 
-        # ---- sync progress column
-        syncbox = QVBoxLayout()
-        syncbox.setSpacing(6)
-        self.disk_line = mk_label("0 GB used  ·  0 of 0 cached", "titleSm")
-        syncbox.addWidget(self.disk_line)
+        # ---- sync panel
+        panel = QFrame()
+        panel.setObjectName("panel")
+        panel.setFixedWidth(296)
+        pl = QVBoxLayout(panel)
+        pl.setContentsMargins(14, 12, 14, 12)
+        pl.setSpacing(7)
+        pl.addWidget(label_caps("Sync status"))
+        pct_row = QHBoxLayout()
+        pct_row.setSpacing(6)
+        self.sync_pct = QLabel("0%")
+        self.sync_pct.setStyleSheet(
+            "font-family: 'Fira Code'; font-size: 22px; font-weight: 700; color: #f8fafc;")
+        pct_row.addWidget(self.sync_pct)
+        pct_row.addWidget(mk_label("complete", "small"))
+        pct_row.addStretch(1)
+        pl.addLayout(pct_row)
         self.sync_bar = styled_bar("primary")
-        syncbox.addWidget(self.sync_bar)
-        progress_row = QHBoxLayout()
-        progress_row.addWidget(label_caps("Sync Progress"))
-        progress_row.addStretch(1)
-        self.sync_pct = mk_label("0% Complete", "titleMd")
-        progress_row.addWidget(self.sync_pct)
-        syncbox.addLayout(progress_row)
+        pl.addWidget(self.sync_bar)
+        self.disk_line = mk_label("No episodes yet", "small")
+        pl.addWidget(self.disk_line)
         counts_row = QHBoxLayout()
-        counts_row.setSpacing(8)
-        self.chip_local = chip_tag("LOCAL FILES  ·  0", "emerald")
+        counts_row.setSpacing(6)
+        self.chip_local = chip_tag("LOCAL  ·  0", "emerald")
         self.chip_queue = chip_tag("QUEUE  ·  0", "amber")
         counts_row.addWidget(self.chip_local)
         counts_row.addWidget(self.chip_queue)
         counts_row.addStretch(1)
-        syncbox.addLayout(counts_row)
-
-        qlab = label_caps("Quality")
-        syncbox.addWidget(qlab)
+        pl.addLayout(counts_row)
+        pl.addWidget(label_caps("Download quality"))
         self.quality = QComboBox()
         self.quality.setObjectName("chip")
         for val, lab in QUALITY_OPTIONS:
             self.quality.addItem(lab, val)
         self.quality.setFixedHeight(30)
-        syncbox.addWidget(self.quality)
-
-        dl_all = btn("▶  Download All Pending", "primary")
+        pl.addWidget(self.quality)
+        dl_all = btn("Download All Pending", "primary")
+        dl_all.setIcon(icon("play", T_ON_PRIMARY, 13))
+        dl_all.setIconSize(QSize(13, 13))
         dl_all.clicked.connect(self._download_all)
-        syncbox.addWidget(dl_all)
-        verify = btn("⚡  Verify / Scan Disk", "ghost")
+        pl.addWidget(dl_all)
+        pair = QHBoxLayout()
+        pair.setSpacing(6)
+        verify = btn("Verify", "ghost", "Re-scan the archive on disk", small=True)
+        verify.setIcon(icon("rotate", T_SEC, 13))
+        verify.setIconSize(QSize(13, 13))
         verify.clicked.connect(lambda: self.sync_series.emit(self.series_id))
-        syncbox.addWidget(verify)
-        addurls = btn("＋  Add Episode URLs", "ghost")
+        addurls = btn("URLs", "ghost", "Import more episode URLs", small=True)
+        addurls.setIcon(icon("plus", T_SEC, 13))
+        addurls.setIconSize(QSize(13, 13))
         addurls.clicked.connect(self._quick_import)
-        syncbox.addWidget(addurls)
-        il.addLayout(syncbox)
+        pair.addWidget(verify)
+        pair.addWidget(addurls)
+        pl.addLayout(pair)
+        il.addWidget(panel, 0, Qt.AlignmentFlag.AlignTop)
         root.addWidget(info)
 
-        # ---- registry tabs
+        # ---- registry toolbar
         reg_head = QHBoxLayout()
+        reg_head.setSpacing(8)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(0)
+        title_col.addWidget(eyebrow("Episode registry"))
+        self.reg_count = mk_label("", "small")
+        title_col.addWidget(self.reg_count)
+        reg_head.addLayout(title_col)
+        reg_head.addSpacing(12)
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
         self.tab_buttons: Dict[str, QPushButton] = {}
         for key, name in [("all", "All")] + self.TABS:
-            b = QPushButton(name)
-            b.setObjectName("chip")
+            b = btn(name, "chip", small=True)
             b.setCheckable(True)
+            b.setFixedHeight(30)
             b.setChecked(key == "all")
             self._tab_group.addButton(b)
             b.clicked.connect(lambda _=False, k=key: self.set_tab(k))
@@ -149,25 +199,30 @@ class SeriesDetailView(QWidget):
             reg_head.addWidget(b)
         reg_head.addStretch(1)
         self.search = QLineEdit()
+        self.search.setObjectName("search")
         self.search.setPlaceholderText("Filter episodes…")
-        self.search.setFixedWidth(220)
+        self.search.setClearButtonEnabled(True)
+        self.search.setFixedHeight(32)
+        self.search.setFixedWidth(230)
         self.search.textChanged.connect(self._render_rows)
         reg_head.addWidget(self.search)
         root.addLayout(reg_head)
 
-        self.rows_host = PosterGrid()
+        self.rows_host = StackList(spacing=6)
         self.area = QScrollArea()
         self.area.setWidgetResizable(True)
         self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         host = QWidget()
         host.setObjectName("scrollHost")
         hl = QVBoxLayout(host)
-        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setContentsMargins(0, 0, 4, 0)
+        hl.setSpacing(8)
         hl.addWidget(self.rows_host)
-        hl.addStretch(1)
-        self.empty = mk_label("No episodes in this bucket.", "body", "muted")
-        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty = EmptyState(
+            "≡", "No episodes in this bucket",
+            "Try another tab or clear the filter to see the full registry.")
         hl.addWidget(self.empty)
+        hl.addStretch(1)
         self.area.setWidget(host)
         root.addWidget(self.area, 1)
 
@@ -176,50 +231,109 @@ class SeriesDetailView(QWidget):
     def series_id(self) -> int:
         return int(self.series.get("id", 0) or 0)
 
+    def set_poster(self, pix: QPixmap) -> None:
+        self.poster.set_poster(pix)
+
+    @staticmethod
+    def _stat_col(layout: QHBoxLayout, caption: str) -> QLabel:
+        box = QVBoxLayout()
+        box.setSpacing(0)
+        cap = QLabel(caption.upper())
+        cap.setObjectName("statCap")
+        val = QLabel("0")
+        val.setObjectName("statValue")
+        box.addWidget(cap)
+        box.addWidget(val)
+        wrap = QWidget()
+        wrap.setLayout(box)
+        layout.addWidget(wrap)
+        return val
+
+    def set_quality_silent(self, value: str) -> None:
+        idx = self.quality.findData(value)
+        if idx >= 0:
+            self.quality.blockSignals(True)
+            self.quality.setCurrentIndex(idx)
+            self.quality.blockSignals(False)
+
     def load(self, series: Dict[str, Any], poster_vid: str) -> None:
         self.series = series
         vid = poster_vid or ""
+        self.poster.vid = vid
         pix = self.thumbs.get(vid) if vid else None
-        if pix and not pix.isNull():
-            self.poster.setPixmap(
-                pix.scaled(self.poster.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                           Qt.TransformationMode.SmoothTransformation))
+        self.poster.set_poster(pix if pix and not pix.isNull() else QPixmap())
         tot = int(series.get("total_episodes", 0) or 0)
         done = int(series.get("downloaded_episodes", 0) or 0)
         pend = int(series.get("pending_episodes", 0) or 0)
         self.chip_eps.setText(f"{tot} EPS")
-        self.chip_status.setText("COMPLETE" if tot and done >= tot else
-                                 ("AUTO-TRACKING: Active" if pend else "NOT STARTED"))
+        if tot and done >= tot:
+            self.chip_status.setText("COMPLETE")
+            self._set_status_tone("emerald")
+        elif pend:
+            self.chip_status.setText(f"{done} OF {tot} DOWNLOADED")
+            self._set_status_tone("sky")
+        else:
+            self.chip_status.setText("NOT STARTED")
+            self._set_status_tone("amber")
         self.title.setText(series.get("name") or "")
-        self.sub.setText(f"Key: {series.get('key', '')}  ·  Added {str(series.get('created_at') or '')[:10]}")
+        self.sub.setText(
+            f"Key: {series.get('key', '')}  ·  Added {str(series.get('created_at') or '')[:10]}")
+        self.desc.setText((series.get("description") or "").strip()
+                          or "No synopsis recorded yet.")
         self.path_lab.setText((series.get("save_dir") or "").replace(os.path.expanduser("~"), "~"))
         try:
             self._episodes = db.get_episodes(self.series_id) or []
         except Exception as exc:
             self._episodes = []
             self.toast.emit(f"Could not load episodes: {exc}", False)
-        n_failed = sum(1 for e in self._episodes if e.get("status") == "failed")
-        self.tab_buttons["failed"].setText(f"Failed ({n_failed})")
         self.render_stats()
+
+    def _set_status_tone(self, tone: str) -> None:
+        tones = {
+            "emerald": (T_EMERALD_SOFT, T_EMERALD_LINE, T_EMERALD2),
+            "amber": (T_AMBER_SOFT, T_AMBER_LINE, T_AMBER2),
+            "sky": (T_PRIMARY_SOFT, T_PRIMARY_LINE, T_PRIMARY),
+        }
+        bg, line, fg = tones.get(tone, tones["sky"])
+        self.chip_status.setStyleSheet(
+            f"background: {bg}; border: 1px solid {line}; border-radius: 8px;"
+            f"color: {fg}; font-size: 10px; font-weight: 700; padding: 2px 8px;"
+        )
 
     def render_stats(self) -> None:
         tot = len(self._episodes)
         done = sum(1 for e in self._episodes if e.get("status") == "downloaded")
         failed = sum(1 for e in self._episodes if e.get("status") == "failed")
-        pend = tot - done - failed
+        queued = sum(1 for e in self._episodes
+                     if e.get("status") in ("pending", "queued"))
+        pct_done = pct(done, tot)
         self.disk_line.setText("scanning disk…" if tot else "No episodes yet")
-        self.sync_bar.setValue(pct(done, tot))
-        self.sync_pct.setText(f"{pct(done, tot)}% Complete")
-        self.chip_local.setText(f"LOCAL FILES  ·  {done}")
-        self.chip_queue.setText(f"QUEUE  ·  {max(0, pend)}" + (f"  ·  {failed} FAILED" if failed else ""))
+        self.sync_bar.setValue(pct_done)
+        self.sync_pct.setText(f"{pct_done}%")
+        self.chip_local.setText(f"LOCAL  ·  {done}")
+        self.chip_queue.setText(
+            f"QUEUE  ·  {queued}" + (f"  ·  {failed} FAILED" if failed else ""))
+        self.stat_total.setText(str(tot))
+        self.stat_ready.setText(str(done))
+        self.stat_pending.setText(str(queued))
+        self.stat_failed.setText(str(failed))
+        self.reg_count.setText(f"{tot} episodes tracked")
+        self.tab_buttons["all"].setText(f"All ({tot})")
+        self.tab_buttons["pending"].setText(f"Queued ({queued})")
+        self.tab_buttons["downloaded"].setText(f"Downloaded ({done})")
+        self.tab_buttons["failed"].setText(f"Failed ({failed})")
         self._render_rows()
 
     def update_disk_line(self, size: int) -> None:
         done = sum(1 for e in self._episodes if e.get("status") == "downloaded")
-        self.disk_line.setText(f"{human_size(size)} used  ·  {done} of {len(self._episodes)} cached")
+        self.disk_line.setText(
+            f"{human_size(max(0, int(size or 0)))} used  ·  {done} of {len(self._episodes)} cached")
 
     def set_tab(self, key: str) -> None:
         self._tab = key
+        btn_ = self.tab_buttons.get(key)
+        if btn_ is not None:
+            btn_.setChecked(True)
         self._render_rows()
 
     def _render_rows(self) -> None:
@@ -227,9 +341,12 @@ class SeriesDetailView(QWidget):
         rows = []
         for i, e in enumerate(self._episodes):
             st = e.get("status") or "pending"
-            if self._tab != "all" and self._tab != st:
+            if self._tab == "pending" and st not in ("pending", "queued"):
                 continue
-            if text and text not in (e.get("title") or "").lower() and text not in (e.get("url") or "").lower():
+            if self._tab in ("downloaded", "failed") and self._tab != st:
+                continue
+            if text and text not in (e.get("title") or "").lower() \
+                    and text not in (e.get("url") or "").lower():
                 continue
             rows.append(EpisodeRow(e, i))
             last = rows[-1]
@@ -285,7 +402,10 @@ class SeriesDetailView(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Episode")
         dlg.setStyleSheet(app_stylesheet())
+        dlg.setMinimumWidth(520)
         lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(22, 18, 22, 16)
+        lay.setSpacing(8)
         lay.addWidget(mk_label("Episode details", "titleMd"))
         title_in = QLineEdit(ep.get("title") or "")
         title_in.setPlaceholderText("Title")
@@ -334,16 +454,17 @@ class SeriesDetailView(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Series")
         dlg.setStyleSheet(app_stylesheet())
-        dlg.setMinimumWidth(460)
+        dlg.setMinimumWidth(480)
         lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(22, 18, 22, 16)
+        lay.setSpacing(8)
         lay.addWidget(mk_label("Series details", "titleMd"))
         name_in = QLineEdit(self.series.get("name") or "")
         desc_in = QTextEdit(self.series.get("description") or "")
         desc_in.setMinimumHeight(70)
         dir_row = QHBoxLayout()
         dir_in = QLineEdit((self.series.get("save_dir") or "").replace(os.path.expanduser("~"), "~"))
-        browse = btn("Browse…", "ghost")
-        browse.setMinimumHeight(30)
+        browse = btn("Browse…", "ghost", small=True)
 
         def _pick():
             path = QFileDialog.getExistingDirectory(dlg, "Series folder",
@@ -383,4 +504,3 @@ class SeriesDetailView(QWidget):
                 self.episode_changed.emit(self.series_id)
             except Exception as exc:
                 self.toast.emit(f"Update failed: {exc}", False)
-
