@@ -32,5 +32,9 @@ donghua-gui = "gui:main"
 donghua-cli = "script:main"
 
 [tool.setuptools]
-# Flat module layout: each file is a top-level module (backward compatible).
-py-modules = ["script", "gui", "db", "downloader", "urls"]
+# Flat module layout for the CLI/db/downloader (backward compatible) plus the
+# gui package: one module per page, reusable components, infrastructure adapters.
+py-modules = ["script", "db", "downloader", "urls"]
+
+[tool.setuptools.packages.find]
+include = ["gui", "gui.*"]
