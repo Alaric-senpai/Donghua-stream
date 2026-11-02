@@ -124,16 +124,52 @@ class VideoDownloader:
         browser: Optional[str] = None,
         write_subs: bool = True,
         on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        ydl_logger: Any = None,
+        container: str = "mp4",
+        sub_langs: str = "en",
+        rate_limit: Optional[float] = None,
     ):
         self.quality = quality
         self.max_retries = max_retries
         self.browser = browser
         self.write_subs = write_subs
         self.on_event = on_event
+        self.cancel_check = cancel_check
+        self.ydl_logger = ydl_logger
+        self.container = container
+        self.sub_langs = sub_langs
+        self.rate_limit = rate_limit
 
     def _notify(self, event: str, **kwargs):
         if self.on_event:
             self.on_event(event, kwargs)
+
+    def _progress_hook(self, d: Dict[str, Any]):
+        """yt-dlp progress hook: forwards live telemetry and honours cancellation."""
+        if self.cancel_check and self.cancel_check():
+            raise yt_dlp.utils.DownloadCancelled("Download cancelled by user.")
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            self._notify(
+                "progress",
+                filename=d.get("filename", ""),
+                downloaded_bytes=d.get("downloaded_bytes") or 0,
+                total_bytes=total,
+                speed=d.get("speed") or 0,
+                eta=d.get("eta") or 0,
+                status="downloading",
+            )
+        elif d.get("status") == "finished":
+            self._notify(
+                "progress",
+                filename=d.get("filename", ""),
+                downloaded_bytes=d.get("downloaded_bytes") or 0,
+                total_bytes=d.get("total_bytes") or d.get("downloaded_bytes") or 0,
+                speed=0,
+                eta=0,
+                status="finished",
+            )
 
     def download_urls(
         self,
@@ -152,19 +188,28 @@ class VideoDownloader:
         ydl_opts: Dict[str, Any] = {
             "outtmpl": os.path.join(save_dir, "%(title)s.%(ext)s"),
             "format": format_str,
-            "merge_output_format": "mp4",
+            "merge_output_format": self.container if self.container in ("mp4", "mkv", "webm", "mov") else "mp4",
             "noplaylist": True,
             "download_archive": archive_file,
             "warn_when_outdated": False,
             "quiet": False,
             "no_warnings": False,
+            "progress_hooks": [self._progress_hook],
         }
 
+        if self.rate_limit is not None and self.rate_limit > 0:
+            ydl_opts["ratelimit"] = self.rate_limit * 1024 * 1024  # MB/s -> bytes/s
+
+        if self.ydl_logger is not None:
+            # Route yt-dlp console output to a custom logger (used by the GUI)
+            ydl_opts["logger"] = self.ydl_logger
+
         if self.write_subs:
+            langs = [l.strip() for l in (self.sub_langs or "en").split(",") if l.strip()] or ["en"]
             ydl_opts.update({
                 "writesubtitles": True,
                 "writeautomaticsub": True,
-                "subtitleslangs": ["en"],
+                "subtitleslangs": langs,
                 "subtitlesformat": "srt",
             })
 
@@ -180,6 +225,10 @@ class VideoDownloader:
         )
 
         for index, url in enumerate(urls, 1):
+            if self.cancel_check and self.cancel_check():
+                self._notify("cancelled")
+                break
+
             clean_url = url.strip()
             if not clean_url or clean_url.startswith("#"):
                 continue
@@ -194,6 +243,8 @@ class VideoDownloader:
             last_err = ""
 
             for attempt in range(1, self.max_retries + 1):
+                if self.cancel_check and self.cancel_check():
+                    break
                 self._notify(
                     "attempt",
                     url=clean_url,
@@ -212,6 +263,9 @@ class VideoDownloader:
                     summary.succeeded.append(clean_url)
                     success = True
                     break
+                except yt_dlp.utils.DownloadCancelled:
+                    self._notify("cancelled", url=clean_url, index=index, total=len(urls))
+                    return summary
                 except Exception as exc:
                     last_err = str(exc)
                     self._notify(
@@ -221,7 +275,7 @@ class VideoDownloader:
                         max_retries=self.max_retries,
                         error=last_err,
                     )
-                    if attempt < self.max_retries:
+                    if attempt < self.max_retries and not (self.cancel_check and self.cancel_check()):
                         backoff = 2 * attempt
                         time.sleep(backoff)
 

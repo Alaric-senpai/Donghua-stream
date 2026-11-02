@@ -539,6 +539,45 @@ def delete_episode(episode_id: int) -> bool:
     return True
 
 
+def update_episode_fields(episode_id: int, title: Optional[str] = None,
+                          episode_number: Optional[int] = None,
+                          url: Optional[str] = None) -> bool:
+    """Edit an episode's title, number, and/or URL (CRUD support for the GUI/CLI)."""
+    updates, params = [], []
+    if title is not None:
+        updates.append("title = %s")
+        params.append(title.strip())
+    if episode_number is not None and episode_number > 0:
+        updates.append("episode_number = %s")
+        params.append(episode_number)
+    if url is not None and url.strip():
+        clean_url = url.strip()
+        updates.append("url = %s")
+        params.append(clean_url)
+        updates.append("video_id = %s")
+        params.append(extract_video_id(clean_url))
+    if not updates:
+        return False
+    params.append(episode_id)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE episodes SET {', '.join(updates)} WHERE id = %s", params)
+        conn.commit()
+    return True
+
+
+def get_series_poster_ids() -> Dict[int, str]:
+    """Return {series_id: first_episode_video_id} for library poster thumbnails."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT e.series_id, e.video_id FROM episodes e
+                WHERE e.id = (SELECT MIN(e2.id) FROM episodes e2
+                              WHERE e2.series_id = e.series_id);
+            """)
+            return {r[0]: r[1] for r in cur.fetchall()}
+
+
 # ==============================================================================
 # Settings Operations
 # ==============================================================================
@@ -548,6 +587,9 @@ DEFAULT_SETTINGS = {
     "default_quality": "720p",
     "browser_cookies": "brave",
     "max_retries": "3",
+    "default_container": "mp4",
+    "sub_langs": "en",
+    "rate_limit_mb": "0",
 }
 
 

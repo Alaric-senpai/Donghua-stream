@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "donghua-stream"
+version = "1.0.0"
+description = "Donghua / YouTube video downloader with a TV-streaming-style PyQt6 desktop app and rich interactive CLI, backed by PostgreSQL."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Alaric-senpai" }]
+keywords = ["youtube", "donghua", "downloader", "yt-dlp", "postgresql", "pyqt6"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Multimedia :: Video :: Capture",
+]
+dependencies = [
+    "yt-dlp>=2024.1.0",
+    "psycopg2-binary>=2.9",
+    "rich>=13.0",
+    "questionary>=2.0",
+    "PyQt6>=6.6",
+]
+
+[project.urls]
+# Local development project; no remote yet.
+
+[project.scripts]
+donghua = "script:main"
+donghua-gui = "gui:main"
+donghua-cli = "script:main"
+
+[tool.setuptools]
+# Flat module layout: each file is a top-level module (backward compatible).
+py-modules = ["script", "gui", "db", "downloader", "urls"]

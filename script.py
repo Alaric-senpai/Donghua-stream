@@ -926,12 +926,19 @@ Examples:
     parser.add_argument("-b", "--browser", type=str, default=DEFAULT_BROWSER, help="Browser to read cookies from (e.g. brave, chrome)")
     parser.add_argument("-r", "--retries", type=int, default=3, help="Max retry attempts per video (default: 3)")
     parser.add_argument("-i", "--interactive", action="store_true", help="Force interactive mode")
+    parser.add_argument("--gui", action="store_true", help="Launch the Donghua Stream PyQt6 desktop app")
 
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the `donghua` console command and `python script.py`."""
     args = parse_args()
+
+    # GUI mode shortcut
+    if args.gui:
+        import gui as gui_module
+        sys.exit(gui_module.main())
 
     # Determine if CLI flags were provided or if we should run interactively
     has_cli_action = (
@@ -1036,3 +1043,7 @@ if __name__ == "__main__":
                     max_retries=args.retries,
                 )
             sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
