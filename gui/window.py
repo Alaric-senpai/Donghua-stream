@@ -3,7 +3,7 @@ import os
 import traceback
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt6.QtCore import QUrl
+from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QStackedWidget,
@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self._workers: List[DbWorker] = []
         self._sizes: Dict[int, int] = {}
         self._scanner: Optional[SizeScanner] = None
+        self._catalog_loaded = False
         self._detail_sid = 0
         self._detail_vid = ""
 
@@ -279,6 +280,13 @@ class MainWindow(QMainWindow):
             free = disk_free(self.settings.get("global_save_dir", "~/Videos"))
             self.status_free.setText(f"Storage: {human_size(free)} free")
             self.start_size_scan(series)
+            if not self._catalog_loaded:
+                # The scroll area can settle on a transient offset while the
+                # first catalog is arriving. Put Home back at the hero once
+                # the real content and layout are in place.
+                self._catalog_loaded = True
+                QTimer.singleShot(0, self.home_view.scroll_to_top)
+                QTimer.singleShot(250, self.home_view.scroll_to_top)
             if self.stack.currentIndex() == self._page_by_key["downloads"]:
                 self.downloads_view.on_state_changed()
         self.run_db(lambda: (db.get_all_series(), db.get_series_poster_ids()), _loaded)

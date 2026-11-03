@@ -153,6 +153,14 @@ class HomeView(QWidget):
         root.addWidget(self.page_scroll)
 
     # ---- mode / filter plumbing -------------------------------------------
+    def scroll_to_top(self) -> None:
+        """Return Home to the hero (used after the first catalog load)."""
+        try:
+            bar = self.page_scroll.verticalScrollBar()
+            bar.setValue(bar.minimum())
+        except RuntimeError:
+            pass
+
     def set_mode(self, list_mode: bool) -> None:
         self._list_mode = list_mode
         self.grid_toggle.setChecked(not list_mode)
