@@ -108,11 +108,11 @@ class MainWindow(QMainWindow):
         self.detail_view.open_folder.connect(self._open_folder)
         self.detail_view.sync_series.connect(self._sync_series)
         self.detail_view.episode_changed.connect(lambda sid: (self.refresh_full(sid)))
-        self.detail_view.toast.connect(lambda msg, ok: self.statusToast.show_message(msg, ok))
+        self.detail_view.toast.connect(self._on_page_toast)
         self.settings_view.test_connection.connect(self._test_connection)
         self.settings_view.resync_requested.connect(self._force_resync)
         self.settings_view.settings_changed.connect(self._on_settings_changed)
-        self.settings_view.toast.connect(lambda msg, ok: self.statusToast.show_message(msg, ok))
+        self.settings_view.toast.connect(self._on_page_toast)
 
         # ---- status strip (bottom per Stitch footer spec)
         strip = QFrame()
@@ -501,14 +501,20 @@ class MainWindow(QMainWindow):
             try:
                 db.delete_series(sid)
                 self.statusToast.show_message(f"Deleted {name}.", True)
-            except Exception as exc:
-                self.statusToast.show_message(f"Delete failed: {exc}", False)
+            except Exception:
+                report_error(
+                    self, "Delete failed",
+                    f"'{name}' could not be removed from the catalog.",
+                    traceback.format_exc())
             self.refresh_full()
 
     def _sync_series(self, sid: int) -> None:
         def _done(res) -> None:
             if isinstance(res, Exception):
-                self.statusToast.show_message(f"Sync failed: {res}", False)
+                report_error(
+                    self, "Archive sync failed",
+                    "The series archive could not be re-scanned.",
+                    f"{type(res).__name__}: {res}")
             else:
                 self.statusToast.show_message("Archive re-sync finished.", True)
             self.refresh_full()
@@ -523,7 +529,10 @@ class MainWindow(QMainWindow):
 
         def _done(res) -> None:
             if isinstance(res, Exception):
-                self.statusToast.show_message(f"Re-sync failed: {res}", False)
+                report_error(
+                    self, "Library re-sync failed",
+                    "The catalog could not be reconciled with urls.py and disk.",
+                    f"{type(res).__name__}: {res}")
             else:
                 self.statusToast.show_message("Library re-synced.", True)
             self.refresh_full()
@@ -537,11 +546,25 @@ class MainWindow(QMainWindow):
 
         def _done(res) -> None:
             self.sidebar.set_db_ok(res is True or not isinstance(res, Exception))
-            self.statusToast.show_message(
-                "Database connection OK ✔" if res is True else f"Connection failed: {res}",
-                res is True)
+            if res is True:
+                self.statusToast.show_message("Database connection OK ✔", True)
+            else:
+                report_error(
+                    self, "Database connection failed",
+                    "PostgreSQL could not be reached with the configured credentials.",
+                    f"{type(res).__name__}: {res}")
             self.refresh_full()
         self.run_db(_ping, _done)
+
+    def _on_page_toast(self, message: str, ok: bool) -> None:
+        """Successes stay as toasts; failures open a copyable report."""
+        if ok:
+            self.statusToast.show_message(message, True)
+            return
+        report_error(
+            self, "Action failed", message,
+            f"{message}\n\nThis report is copyable so it can be pasted into "
+            "a bug report or chat.")
 
     def _on_settings_changed(self, key: str) -> None:
         self.settings = load_settings()
