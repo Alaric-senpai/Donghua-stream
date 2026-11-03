@@ -22,7 +22,8 @@ from rich import box
 import questionary
 from questionary import Choice, Style
 
-# Database & Modularized components
+# Shared configuration & database components
+import app_config
 import db
 from db import (
     init_db,
@@ -103,14 +104,12 @@ SESSION_SETTINGS = {
 }
 
 DB_INITIALIZED = False
+CREDENTIALS_CHECKED = False
 
 
 def load_session_settings() -> None:
-    """Load persisted preferences from PostgreSQL into SESSION_SETTINGS."""
-    try:
-        saved = db.get_all_settings()
-    except Exception:
-        return
+    """Load persisted preferences from the shared JSON config."""
+    saved = app_config.settings()
     SESSION_SETTINGS["quality"] = saved.get(
         "default_quality", SESSION_SETTINGS["quality"])
     browser = str(saved.get("browser_cookies", "")).strip().lower()
@@ -126,9 +125,106 @@ def load_session_settings() -> None:
 def save_session_setting(key: str, value: Any) -> None:
     """Persist a CLI preference so the GUI and future sessions share it."""
     try:
-        db.set_setting(key, str(value))
+        app_config.set_setting(key, str(value))
     except Exception as exc:
         console.print(f"[yellow]⚠ Could not save {key.replace('_', ' ')}: {exc}[/yellow]")
+
+
+def ensure_configured_credentials() -> bool:
+    """Prompt for anything missing in ``~/.config/donghua-stream/config.json``.
+
+    Returns False only when database credentials are still unusable.  The
+    YouTube key is optional for the CLI (it powers the GUI Explore page), so a
+    blank answer just leaves that feature disabled.
+    """
+    global CREDENTIALS_CHECKED
+    if CREDENTIALS_CHECKED:
+        return app_config.database_ready()
+    CREDENTIALS_CHECKED = True
+
+    try:
+        issues = app_config.credential_issues()
+    except app_config.ConfigError as exc:
+        console.print(
+            "[bold red]Config file problem:[/bold red] "
+            f"{app_config.display_path()} could not be read.\n"
+            f"[dim]{exc}[/dim]\n"
+            "Fix the JSON, or remove the file to start from defaults.")
+        return False
+    if not issues:
+        return True
+
+    db_issues = [i for i in issues if i["section"] == "database"]
+    yt_issue = any(i["section"] == "youtube" for i in issues)
+    interactive = bool(sys.stdin.isatty())
+
+    if db_issues:
+        console.print(
+            f"\n[bold yellow]⚠ Missing credentials in[/bold yellow] "
+            f"[bold]{app_config.display_path()}[/bold]"
+        )
+        for issue in db_issues:
+            console.print(f"  [red]•[/red] {issue['label']}")
+
+    if not interactive:
+        if db_issues:
+            console.print(
+                "[bold red]Set the PostgreSQL values in the config file "
+                "before running non-interactive commands.[/bold red]\n"
+                f"[dim]{app_config.display_path()}[/dim]\n")
+            return False
+        if yt_issue:
+            console.print(
+                "[dim]YouTube Explore is disabled until an API key is saved "
+                f"in {app_config.display_path()}.[/dim]\n")
+        return True
+
+    if db_issues:
+        current = app_config.database_config()
+        console.print("[dim]Enter the PostgreSQL connection details (stored in the config file).[/dim]")
+        host = questionary.text(
+            "PostgreSQL host:", default=str(current.get("host") or "localhost"),
+            style=custom_style).ask()
+        port = questionary.text(
+            "PostgreSQL port:", default=str(current.get("port") or 5432),
+            validate=lambda v: True if v.isdigit() and 1 <= int(v) <= 65535
+            else "Enter a port between 1 and 65535",
+            style=custom_style).ask()
+        default_user = str(current.get("user") or os.environ.get("USER") or "")
+        user = questionary.text(
+            "PostgreSQL user:", default=default_user,
+            style=custom_style).ask()
+        password = questionary.password(
+            "PostgreSQL password (leave blank if not required):",
+            style=custom_style).ask()
+        dbname = questionary.text(
+            "Database name:", default=str(current.get("dbname") or "donghua_db"),
+            style=custom_style).ask()
+        if not host or not user or not dbname:
+            console.print("[bold red]Database credentials were not saved.[/bold red]")
+            return False
+        app_config.set_database({
+            "host": host.strip(), "port": int(port or 5432),
+            "user": user.strip(), "password": password or "",
+            "dbname": dbname.strip(),
+        })
+        db.reload_db_config()
+        console.print(f"[green]✔ Database credentials saved · {app_config.display_path()}[/green]")
+
+    if yt_issue:
+        console.print(
+            "[dim]A YouTube Data API v3 key is needed for the GUI Explore screen. "
+            "Create one in Google Cloud Console → APIs & Services → Credentials.[/dim]")
+        key = questionary.password(
+            "YouTube Data API key (leave blank to skip):",
+            style=custom_style).ask()
+        if key and key.strip():
+            app_config.set_youtube({"api_key": key.strip()})
+            console.print("[green]✔ YouTube API key saved.[/green]")
+        else:
+            console.print("[yellow]Skipped — Explore will prompt again.[/yellow]")
+
+    return app_config.database_ready()
 
 
 def ensure_db_ready(quiet: bool = False):
@@ -827,10 +923,12 @@ def interactive_resync_database():
 def interactive_settings():
     """Sub-menu to adjust session preferences."""
     while True:
+        key_state = "Configured" if app_config.youtube_ready() else "Missing"
         choices = [
             Choice(f"Default Quality: [{SESSION_SETTINGS['quality']}]", value="quality"),
             Choice(f"Browser Cookies: [{SESSION_SETTINGS['browser'] or 'Disabled'}]", value="browser"),
             Choice(f"Max Retries:     [{SESSION_SETTINGS['max_retries']}]", value="retries"),
+            Choice(f"YouTube API Key: [{key_state}]", value="youtube"),
             Choice("← Back to Main Menu", value="__back__"),
         ]
 
@@ -872,6 +970,18 @@ def interactive_settings():
                 SESSION_SETTINGS["max_retries"] = int(new_r)
                 save_session_setting("max_retries", new_r)
                 console.print(f"[green]Max retries saved: {SESSION_SETTINGS['max_retries']}[/green]")
+        elif action == "youtube":
+            current_key = app_config.get_youtube_api_key()
+            masked = "••••" + current_key[-4:] if current_key else "not set"
+            console.print(f"[dim]Current key: {masked} · {app_config.display_path()}[/dim]")
+            new_key = questionary.password(
+                "Paste a YouTube Data API v3 key (blank keeps the current value):",
+                style=custom_style).ask()
+            if new_key and new_key.strip():
+                app_config.set_youtube({"api_key": new_key.strip()})
+                console.print("[green]YouTube API key saved.[/green]")
+            elif new_key is not None:
+                console.print("[dim]Key unchanged.[/dim]")
 
 
 def main_interactive_menu():
@@ -972,10 +1082,14 @@ def main():
     """Entry point for the `donghua` console command and `python script.py`."""
     args = parse_args()
 
-    # GUI mode shortcut
+    # GUI mode shortcut (the desktop app runs its own credential dialog)
     if args.gui:
         import gui as gui_module
         sys.exit(gui_module.main())
+
+    # The config file is the only credential source for both front-ends.
+    if not ensure_configured_credentials():
+        sys.exit(2)
 
     # Determine if CLI flags were provided or if we should run interactively
     has_cli_action = (

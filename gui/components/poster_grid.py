@@ -47,18 +47,16 @@ class PosterGrid(QWidget):
         width = self._content_width()
         self._layout_width = width
         first = self._items[0]
-        tile_w = first.sizeHint().width() or first.width() or 208
-        tile_w = max(80, tile_w)
+        tile_w = max(first.sizeHint().width(), first.minimumWidth(), 1)
         cols = max(1, (width + self.GAP_X) // (tile_w + self.GAP_X))
 
         x = y = 0
         row_h = 0
         for i, w in enumerate(self._items):
-            hint = w.sizeHint()
-            iw = hint.width() if hint.width() > 0 else tile_w
-            ih = hint.height() if hint.height() > 0 else w.height()
-            iw = max(1, iw)
-            ih = max(1, ih)
+            # Honour setFixedSize(): some tiles (Explore video cards) are
+            # wider than their layout sizeHint, and must not be squeezed.
+            iw = max(w.sizeHint().width(), w.minimumWidth(), 1)
+            ih = max(w.sizeHint().height(), w.minimumHeight(), 1)
             w.setGeometry(x, y, iw, ih)
             row_h = max(row_h, ih)
             col = i % cols

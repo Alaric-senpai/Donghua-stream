@@ -4,7 +4,11 @@ import re
 import shutil
 from typing import Any, Dict, List, Optional
 
+import app_config
 import db
+
+
+DEFAULT_SETTINGS = app_config.DEFAULT_SETTINGS
 
 
 def human_size(n: Optional[float]) -> str:
@@ -107,15 +111,16 @@ def pct(part: int, whole: int) -> int:
 
 
 def load_settings() -> Dict[str, str]:
+    """Read the shared JSON config; never depend on a live database."""
     try:
-        return db.get_all_settings()
+        return app_config.settings()
     except Exception:
-        return dict(db.DEFAULT_SETTINGS)
+        return dict(app_config.DEFAULT_SETTINGS)
 
 
 def set_setting(key: str, value: str) -> bool:
     try:
-        return db.set_setting(key, str(value))
+        return app_config.set_setting(key, str(value))
     except Exception:
         return False
 

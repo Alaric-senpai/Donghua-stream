@@ -34,7 +34,7 @@ donghua-cli = "script:main"
 [tool.setuptools]
 # Flat module layout for the CLI/db/downloader (backward compatible) plus the
 # gui package: one module per page, reusable components, infrastructure adapters.
-py-modules = ["script", "db", "downloader", "urls"]
+py-modules = ["script", "db", "downloader", "urls", "app_config", "youtube_api"]
 
 [tool.setuptools.packages.find]
 include = ["gui", "gui.*"]

@@ -16,6 +16,7 @@ from .primitives import hline
 
 NAV_PAGES = [
     ("home", "home", "Home", "Hero spotlight, spotlight rows and the poster catalog."),
+    ("explore", "compass", "Explore", "Discover donghua on YouTube with Data API v3."),
     ("library", "library", "Library", "Every donghua in the database."),
     ("downloads", "download", "Downloads", "Network pipeline telemetry and queue control."),
     ("settings", "settings", "Settings", "Storage, quality, network and database preferences."),
@@ -136,8 +137,11 @@ class Sidebar(QWidget):
 
     @staticmethod
     def _db_host_text() -> str:
-        cfg = getattr(db, "DB_CONFIG", {})
-        return f"donghua_db @ {cfg.get('host', 'localhost')}"
+        cfg = db.get_db_config()
+        return f"{cfg.get('dbname', 'donghua_db')} @ {cfg.get('host', 'localhost')}"
+
+    def refresh_db_host(self) -> None:
+        self.db_host.setText(self._db_host_text())
 
     def set_db_ok(self, ok: bool) -> None:
         tone = T_EMERALD2 if ok else T_ROSE2

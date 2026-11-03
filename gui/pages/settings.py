@@ -1,22 +1,27 @@
-"""Settings: storage, formats, network, auth and database/daemon."""
+"""Settings: storage, formats, network, auth, database and API credentials."""
 import os
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QScrollArea, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
-import db
+import app_config
 from ..components.primitives import btn, eyebrow, hline, label_caps, mk_label
 from ..components.storage_card import StorageCard
-from ..theme import F_MONO, T_SEC
+from ..dialogs.credentials import REGIONS, CredentialsDialog
+from ..icons import icon
+from ..theme import F_MONO, T_AMBER2, T_EMERALD2, T_MUTED, T_SEC
 from ..utils import (
     BROWSER_OPTIONS, CONTAINER_OPTIONS, QUALITY_OPTIONS, disk_free,
     human_size, load_settings, resolve_path, set_setting,
 )
+
+API_CONSOLE_URL = "https://console.cloud.google.com/apis/credentials"
 
 
 def _display_path(path: str) -> str:
@@ -181,23 +186,21 @@ class SettingsView(QWidget):
         # ---- 5. database & daemon (right)
         catalog = SectionCard(
             "Database & Daemon",
-            "The Postgres catalog behind the app and the download daemon.")
-        try:
-            import yt_dlp
-            engine_ver = yt_dlp.version.__version__
-        except Exception:
-            engine_ver = "unknown"
-        cfg = getattr(db, "DB_CONFIG", {})
-        info = QLabel(
-            f"DB    donghua_db @ {cfg.get('host', 'localhost')}\n"
-            f"USER  {cfg.get('user', '-')}\n"
-            f"ENGINE yt-dlp {engine_ver}")
-        info.setWordWrap(True)
-        info.setStyleSheet(
+            "PostgreSQL credentials now live in the shared config file, not in code.")
+        self.db_info = QLabel("")
+        self.db_info.setWordWrap(True)
+        self.db_info.setStyleSheet(
             f"color: {T_SEC}; font-family: '{F_MONO}'; font-size: 10px;"
             "background: rgba(11,18,34,180); border: 1px solid rgba(51,65,85,70);"
             "border-radius: 8px; padding: 10px 12px;")
-        catalog.body.addWidget(info)
+        catalog.body.addWidget(self.db_info)
+        self.config_lbl = QLabel("")
+        self.config_lbl.setWordWrap(True)
+        self.config_lbl.setStyleSheet(
+            f"color: {T_MUTED}; font-family: '{F_MONO}'; font-size: 9px;")
+        self.config_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        catalog.body.addWidget(self.config_lbl)
         dbrow = QHBoxLayout()
         dbrow.setSpacing(8)
         test_btn = btn("⚡  Test Connection", "ghost", "Ping the database now", small=True)
@@ -205,15 +208,72 @@ class SettingsView(QWidget):
         resync_btn = btn("⟳  Force Re-Sync", "ghost",
                          "Re-sync every series against its downloaded.txt", small=True)
         resync_btn.clicked.connect(self.resync_requested.emit)
+        edit_db = btn("Edit Credentials", "ghost",
+                      "Edit PostgreSQL credentials in the shared config", small=True)
+        edit_db.clicked.connect(self._edit_credentials)
+        open_cfg = btn("Config Folder", "ghost",
+                       "Reveal the folder that stores config.json", small=True)
+        open_cfg.clicked.connect(self._open_config_folder)
         dbrow.addWidget(test_btn)
         dbrow.addWidget(resync_btn)
+        dbrow.addWidget(edit_db)
+        dbrow.addWidget(open_cfg)
         dbrow.addStretch(1)
         dbholder = QWidget()
         dbholder.setLayout(dbrow)
         catalog.body.addWidget(dbholder)
         grid.addWidget(catalog, 2, 1)
 
-        grid.setRowStretch(3, 1)
+        # ---- 6. YouTube Data API (full width)
+        api = SectionCard(
+            "YouTube Data API v3",
+            "Powers Explore. The key is stored in config.json and shared with the CLI.")
+        key_row = QHBoxLayout()
+        key_row.setSpacing(8)
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setPlaceholderText("AIza… (leave blank to disable Explore)")
+        self.api_key.setClearButtonEnabled(True)
+        key_row.addWidget(self.api_key, 1)
+        self.show_key = QCheckBox("Show")
+        self.show_key.toggled.connect(
+            lambda on: self.api_key.setEchoMode(
+                QLineEdit.EchoMode.Normal if on
+                else QLineEdit.EchoMode.Password))
+        key_row.addWidget(self.show_key)
+        key_holder = QWidget()
+        key_holder.setLayout(key_row)
+        api.body.addWidget(key_holder)
+
+        api_row = QHBoxLayout()
+        api_row.setSpacing(9)
+        api_row.addWidget(label_caps("Region"))
+        self.api_region = QComboBox()
+        for code, name in REGIONS:
+            self.api_region.addItem(f"{code}  ·  {name}", code)
+        self.api_region.setFixedWidth(210)
+        api_row.addWidget(self.api_region)
+        self.api_state = QLabel("")
+        self.api_state.setStyleSheet(f"color: {T_MUTED}; font-size: 11px;")
+        api_row.addWidget(self.api_state)
+        api_row.addStretch(1)
+        get_key = btn("Get a key", "ghost", "Open Google Cloud credentials",
+                      small=True)
+        get_key.setIcon(icon("external", T_SEC, 13))
+        get_key.setIconSize(QSize(13, 13))
+        get_key.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(API_CONSOLE_URL)))
+        save_api = btn("Save API Key", "primary",
+                       "Write the YouTube key to the shared config", small=True)
+        save_api.clicked.connect(self._save_youtube)
+        api_row.addWidget(get_key)
+        api_row.addWidget(save_api)
+        api_holder = QWidget()
+        api_holder.setLayout(api_row)
+        api.body.addWidget(api_holder)
+        grid.addWidget(api, 3, 0, 1, 2)
+
+        grid.setRowStretch(4, 1)
         scroll.setWidget(host)
         outer.addWidget(scroll, 1)
 
@@ -232,6 +292,7 @@ class SettingsView(QWidget):
 
         for t in self.tiles:
             t.refresh_free()
+        self.refresh_connection_info()
         self._sync_controls()
         self._loading = False
         self._update_disk_hint()
@@ -272,6 +333,67 @@ class SettingsView(QWidget):
         else:
             return
         sec.add_row(label, widget)
+
+    # ---- config / credentials --------------------------------------------
+    def refresh_connection_info(self) -> None:
+        """Refresh labels and API fields from the authoritative config."""
+        try:
+            cfg = app_config.load_config()
+        except Exception:
+            return
+        db_cfg = cfg.get("database", {})
+        yt_cfg = cfg.get("youtube", {})
+        try:
+            import yt_dlp
+            engine_ver = yt_dlp.version.__version__
+        except Exception:
+            engine_ver = "unknown"
+        if hasattr(self, "db_info"):
+            self.db_info.setText(
+                f"DB     {db_cfg.get('dbname') or '-'} @ "
+                f"{db_cfg.get('host') or '-'}:{db_cfg.get('port') or '-'}\n"
+                f"USER   {db_cfg.get('user') or '-'}\n"
+                f"ENGINE yt-dlp {engine_ver}")
+        if hasattr(self, "config_lbl"):
+            self.config_lbl.setText(
+                f"CONFIG {app_config.display_path()}")
+        if hasattr(self, "api_key"):
+            if not self.api_key.hasFocus():
+                self.api_key.setText(str(yt_cfg.get("api_key") or ""))
+            idx = self.api_region.findData(str(yt_cfg.get("region_code") or "US"))
+            if idx >= 0 and not self.api_region.hasFocus():
+                self.api_region.setCurrentIndex(idx)
+            configured = bool(str(yt_cfg.get("api_key") or "").strip())
+            self.api_state.setText(
+                "✔ configured" if configured else "Missing · Explore disabled")
+            self.api_state.setStyleSheet(
+                f"color: {T_EMERALD2 if configured else T_AMBER2};"
+                "font-size: 11px; font-weight: 600;")
+
+    def _edit_credentials(self) -> None:
+        dlg = CredentialsDialog(focus="database", parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.refresh_connection_info()
+        self.settings_changed.emit("*")
+        self.toast.emit("Connection credentials saved to config.json.", True)
+
+    def _open_config_folder(self) -> None:
+        app_config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(app_config.CONFIG_DIR)))
+
+    def _save_youtube(self) -> None:
+        app_config.set_youtube({
+            "api_key": self.api_key.text().strip(),
+            "region_code": str(self.api_region.currentData() or "US"),
+        })
+        self.refresh_connection_info()
+        self.settings_changed.emit("*")
+        if self.api_key.text().strip():
+            self.toast.emit("YouTube API key saved.", True)
+        else:
+            self.toast.emit("YouTube API key cleared — Explore is disabled.", True)
 
     # ---- storage selection ------------------------------------------------
     def _select_tile(self, chosen: StorageCard) -> None:
@@ -378,6 +500,7 @@ class SettingsView(QWidget):
             self.subfolder_chk.setChecked(
                 self.s.get("per_series_subfolder", "1") == "1")
         self._sync_storage()
+        self.refresh_connection_info()
         if hasattr(self, "custom_path"):
             self._update_disk_hint()
 
@@ -412,11 +535,11 @@ class SettingsView(QWidget):
             f"Save location · {_display_path(path)}  ·  {human_size(free)} free")
 
     def _reset(self) -> None:
-        for key, value in db.DEFAULT_SETTINGS.items():
-            set_setting(key, value)
-            self.s[key] = str(value)
-        set_setting("per_series_subfolder", "1")
-        self.s["per_series_subfolder"] = "1"
+        try:
+            self.s = app_config.reset_settings()
+        except Exception as exc:
+            self.toast.emit(f"Could not reset settings: {exc}", False)
+            return
         self._loading = True
         try:
             self._sync_controls()

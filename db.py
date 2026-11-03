@@ -11,14 +11,28 @@ import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import RealDictCursor
 
-# Default Database Configuration
-DB_CONFIG = {
-    "host": os.environ.get("DB_HOST", "localhost"),
-    "port": int(os.environ.get("DB_PORT", "5432")),
-    "user": os.environ.get("DB_USER", "charles"),
-    "password": os.environ.get("DB_PASSWORD", "password"),
-    "dbname": os.environ.get("DB_NAME", "donghua_db"),
-}
+import app_config
+
+
+def get_db_config() -> Dict[str, Any]:
+    """Read PostgreSQL credentials from the central config on every call.
+
+    Reading lazily means a credential edit in Settings takes effect for the
+    very next connection without restarting the app.
+    """
+    return app_config.database_config()
+
+
+def reload_db_config() -> Dict[str, Any]:
+    """Refresh the legacy module-level snapshot used by display-only code."""
+    global DB_CONFIG
+    DB_CONFIG = get_db_config()
+    return DB_CONFIG
+
+
+# Compatibility snapshot for callers that display the connection info.  All
+# actual connections call get_db_config() so they never use a stale value.
+DB_CONFIG = get_db_config()
 
 
 def sanitize_slug(name: str) -> str:
@@ -36,16 +50,17 @@ def extract_video_id(url: str) -> str:
 
 def ensure_database_exists() -> bool:
     """Check if the target PostgreSQL database exists; if not, create it."""
-    target_db = DB_CONFIG["dbname"]
+    cfg = get_db_config()
+    target_db = cfg["dbname"]
     admin_conn = None
     try:
         # Connect to maintenance db 'postgres'
         admin_conn = psycopg2.connect(
             dbname="postgres",
-            user=DB_CONFIG["user"],
-            password=DB_CONFIG["password"],
-            host=DB_CONFIG["host"],
-            port=DB_CONFIG["port"],
+            user=cfg["user"],
+            password=cfg["password"],
+            host=cfg["host"],
+            port=cfg["port"],
         )
         admin_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         with admin_conn.cursor() as cur:
@@ -53,24 +68,28 @@ def ensure_database_exists() -> bool:
             exists = cur.fetchone() is not None
             if not exists:
                 # Safe execution to create database with owner
-                cur.execute(f'CREATE DATABASE "{target_db}" OWNER "{DB_CONFIG["user"]}"')
+                cur.execute(f'CREATE DATABASE "{target_db}" OWNER "{cfg["user"]}"')
                 return True
         return False
     except Exception as e:
-        raise RuntimeError(f"Failed to check or create database '{target_db}': {e}")
+        raise RuntimeError(
+            f"Failed to check or create database '{target_db}' "
+            f"on {cfg['host']}:{cfg['port']} as {cfg['user'] or '(no user)'}: {e}"
+        )
     finally:
         if admin_conn:
             admin_conn.close()
 
 
 def get_connection():
-    """Establish and return a connection to the donghua database."""
+    """Establish and return a connection using the current config values."""
+    cfg = get_db_config()
     return psycopg2.connect(
-        dbname=DB_CONFIG["dbname"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
+        dbname=cfg["dbname"],
+        user=cfg["user"],
+        password=cfg["password"],
+        host=cfg["host"],
+        port=cfg["port"],
     )
 
 
@@ -305,6 +324,7 @@ def init_db() -> Dict[str, Any]:
     """Initialize database: create db if missing, run migrations, and sync existing records."""
     db_created = ensure_database_exists()
     init_schema()
+    import_legacy_settings_from_db()
     ensure_default_settings()
     sync_stats = sync_existing_records()
     # Fill in archives left behind by older versions, then update every
@@ -720,74 +740,51 @@ def get_series_poster_ids() -> Dict[int, str]:
 
 
 # ==============================================================================
-# Settings Operations
+# Settings Operations (config file is authoritative)
 # ==============================================================================
 
-DEFAULT_SETTINGS = {
-    "global_save_dir": os.path.expanduser("~/Videos"),
-    "default_quality": "720p",
-    "browser_cookies": "brave",
-    "max_retries": "3",
-    "default_container": "mp4",
-    "sub_langs": "en",
-    "rate_limit_mb": "0",
-    "per_series_subfolder": "1",
-}
+DEFAULT_SETTINGS = app_config.DEFAULT_SETTINGS
+
+
+def import_legacy_settings_from_db() -> int:
+    """One-time import of the old PostgreSQL ``app_settings`` table.
+
+    The JSON config supersedes this table.  Keeping the import here (rather
+    than in app_config) avoids a circular dependency: app_config must be
+    importable before any database connection exists.
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value FROM app_settings;")
+                rows = dict(cur.fetchall())
+    except Exception:
+        # A missing/old table must never block app_config from working.
+        return 0
+    if not rows:
+        app_config.mark_legacy_imported()
+        return 0
+    return app_config.import_legacy_settings(rows)
 
 
 def ensure_default_settings() -> None:
-    """Insert every shipped setting so the table is complete from day one."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            for key, value in DEFAULT_SETTINGS.items():
-                cur.execute(
-                    """
-                    INSERT INTO app_settings (key, value)
-                    VALUES (%s, %s)
-                    ON CONFLICT (key) DO NOTHING;
-                    """,
-                    (key, str(value)),
-                )
-        conn.commit()
+    """Create the config file on first run (settings are merged in memory)."""
+    app_config.ensure_config_file()
 
 
 def get_setting(key: str, default: Optional[str] = None) -> str:
-    """Retrieve an application setting from PostgreSQL or default."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
-            row = cur.fetchone()
-            if row:
-                return row[0]
-    return default if default is not None else DEFAULT_SETTINGS.get(key, "")
+    """Retrieve an application setting from the central config."""
+    return app_config.get_setting(key, default)
 
 
 def set_setting(key: str, value: str) -> bool:
-    """Save or update an application setting in PostgreSQL."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO app_settings (key, value, updated_at)
-                VALUES (%s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (key) DO UPDATE
-                SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP;
-                """,
-                (key, str(value)),
-            )
-        conn.commit()
-    return True
+    """Save an application setting to the central config."""
+    return app_config.set_setting(key, value)
 
 
 def get_all_settings() -> Dict[str, str]:
-    """Retrieve all application settings as a dictionary."""
-    result = dict(DEFAULT_SETTINGS)
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT key, value FROM app_settings;")
-            for k, v in cur.fetchall():
-                result[k] = v
-    return result
+    """Retrieve all application settings from the central config."""
+    return app_config.settings()
 
 
 def get_db_stats() -> Dict[str, int]:

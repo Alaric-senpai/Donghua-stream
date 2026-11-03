@@ -6,14 +6,16 @@ from typing import Any, Callable, Dict, List, Optional
 from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 import db
 from .components.header_bar import HeaderBar
 from .components.sidebar import Sidebar
 from .components.toast import Toast
+from .dialogs.add_video import prompt_add_video
+from .dialogs.credentials import CredentialsDialog
 from .dialogs.quick_url import QuickUrlDialog
 from .dialogs.error_dialog import report_error
 from .dialogs.wizard import AddWizard
@@ -24,6 +26,7 @@ from .infrastructure.thumbnails import ThumbnailStore
 from .motion import fade_in
 from .pages.detail import SeriesDetailView
 from .pages.downloads import DownloadsView
+from .pages.explore import ExploreView
 from .pages.home import HomeView
 from .pages.library import LibraryView
 from .pages.settings import SettingsView
@@ -81,15 +84,16 @@ class MainWindow(QMainWindow):
         colv.addWidget(self.stack, 1)
 
         self.home_view = HomeView(self.thumbs)
+        self.explore_view = ExploreView(self.thumbs)
         self.library_view = LibraryView(self.thumbs)
         self.detail_view = SeriesDetailView(self.thumbs)
         self.downloads_view = DownloadsView(self.manager)
         self.settings_view = SettingsView(self.settings)
-        for w in (self.home_view, self.library_view, self.detail_view,
-                  self.downloads_view, self.settings_view):
+        for w in (self.home_view, self.explore_view, self.library_view,
+                  self.detail_view, self.downloads_view, self.settings_view):
             self.stack.addWidget(w)
-        self._page_by_key = {"home": 0, "library": 1, "detail": 2,
-                             "downloads": 3, "settings": 4}
+        self._page_by_key = {"home": 0, "explore": 1, "library": 2,
+                             "detail": 3, "downloads": 4, "settings": 5}
 
         # view wiring
         self.home_view.series_opened.connect(self.open_series)
@@ -98,6 +102,12 @@ class MainWindow(QMainWindow):
         self.home_view.series_delete.connect(self._delete_series)
         self.home_view.add_requested.connect(self.open_wizard)
         self.home_view.sync_requested.connect(self._force_resync)
+        self.explore_view.connect_requested.connect(self._connect_youtube)
+        self.explore_view.add_requested.connect(
+            lambda video: self._add_explore_video(video, False))
+        self.explore_view.download_requested.connect(
+            lambda video: self._add_explore_video(video, True))
+        self.explore_view.open_requested.connect(self._open_youtube)
         self.library_view.series_opened.connect(self.open_series)
         self.library_view.series_download_all.connect(self._download_all_for)
         self.library_view.series_folder.connect(self._open_folder_series)
@@ -150,6 +160,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+1"), self, lambda: self.navigateTo("home"))
         QShortcut(QKeySequence("Ctrl+2"), self, lambda: self.navigateTo("library"))
         QShortcut(QKeySequence("Ctrl+3"), self, lambda: self.navigateTo("downloads"))
+        QShortcut(QKeySequence("Ctrl+E"), self, lambda: self.navigateTo("explore"))
         QShortcut(QKeySequence("Ctrl+,"), self, lambda: self.navigateTo("settings"))
         QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
 
@@ -216,16 +227,21 @@ class MainWindow(QMainWindow):
         idx = self._page_by_key.get(key, 0)
         changed = self.stack.currentIndex() != idx
         self.stack.setCurrentIndex(idx)
-        self.sidebar.set_active({"home": "home", "library": "library",
-                                 "downloads": "downloads", "settings": "settings"}.get(key, "home"))
+        self.sidebar.set_active({
+            "home": "home", "explore": "explore", "library": "library",
+            "downloads": "downloads", "settings": "settings",
+        }.get(key, "home"))
         self.header.set_breadcrumb({
-            "home": "Home", "library": "Library", "downloads": "Download Center",
-            "settings": "Settings & Storage", "detail": "Library / Series",
+            "home": "Home", "explore": "Explore", "library": "Library",
+            "downloads": "Download Center", "settings": "Settings & Storage",
+            "detail": "Library / Series",
         }.get(key, "Home"))
         self.header.set_back_visible(key == "detail")
         if changed:
             fade_in(self.stack.currentWidget(), 150)
-        if key == "downloads":
+        if key == "explore":
+            self.explore_view.ensure_loaded()
+        elif key == "downloads":
             self.downloads_view.on_state_changed()
         elif key == "settings":
             self.settings_view._update_disk_hint()
@@ -370,6 +386,64 @@ class MainWindow(QMainWindow):
             else:
                 self.refresh_full(sid)
         self.run_db(lambda: db.add_episode(sid, url, title=title or ""), _saved)
+
+    # ---- explore ----------------------------------------------------------------
+    def _open_youtube(self, video: Dict[str, Any]) -> None:
+        url = str((video or {}).get("url") or "").strip()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _connect_youtube(self) -> None:
+        dlg = CredentialsDialog(focus="youtube", parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.settings_view.refresh_connection_info()
+        self.explore_view.reload_credentials()
+        self.explore_view.refresh()
+        self.statusToast.show_message("YouTube API key saved to the config file.", True)
+
+    def _add_explore_video(self, video: Dict[str, Any], download_now: bool) -> None:
+        payload = prompt_add_video(
+            video, self.home_view._all, download_now=download_now, parent=self)
+        if not payload:
+            return
+        url = str(payload.get("url") or "").strip()
+        if not url:
+            self.statusToast.show_message("This result has no video URL.", False)
+            return
+
+        def _save() -> Dict[str, Any]:
+            sid = payload.get("series_id")
+            if sid:
+                series_id = int(sid)
+                db.add_episode(series_id, url, title=payload.get("title", ""))
+            else:
+                description = (
+                    f"YouTube channel: {payload.get('channel')}"
+                    if payload.get("channel") else "")
+                created = db.create_series(
+                    payload.get("new_name") or "New Donghua",
+                    description=description)
+                series_id = int(created["id"])
+                db.add_episode(series_id, url, title=payload.get("title", ""))
+            return db.get_series(series_id)
+
+        def _saved(res: Any) -> None:
+            if isinstance(res, Exception) or not res:
+                report_error(
+                    self, "Could not add video",
+                    "The YouTube result could not be attached to the library.",
+                    f"{type(res).__name__}: {res}" if isinstance(res, Exception)
+                    else "The target series could not be loaded.")
+                return
+            series = res
+            if payload.get("download_now"):
+                self._enqueue(series, [url])
+            else:
+                self.statusToast.show_message(
+                    f"Added to {series.get('name', 'the library')}.", True)
+                self.refresh_full(int(series["id"]))
+        self.run_db(_save, _saved)
 
     # ---- wizard -----------------------------------------------------------------
     def open_wizard(self, prefill: str = "") -> None:
@@ -577,6 +651,9 @@ class MainWindow(QMainWindow):
     def _on_settings_changed(self, key: str) -> None:
         self.settings = load_settings()
         self.settings_view.s = dict(self.settings)
+        self.settings_view.refresh_connection_info()
+        self.sidebar.refresh_db_host()
+        self.explore_view.reload_credentials()
         if key in ("default_quality", "*"):
             self.header.set_quality_silent(self.settings.get("default_quality", "720p"))
         if key in ("global_save_dir", "*"):
@@ -596,6 +673,10 @@ class MainWindow(QMainWindow):
         # destroy live QThreads on shutdown.
         try:
             self.manager.shutdown()
+        except Exception:
+            pass
+        try:
+            self.explore_view.shutdown()
         except Exception:
             pass
         for w in list(self._workers):
