@@ -5,6 +5,7 @@ from typing import List, Optional
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QApplication
 
+from .errors import install_exception_hook
 from .icons import icon
 from .theme import F_BODY, T_PRIMARY, app_stylesheet
 from .window import MainWindow
@@ -22,6 +23,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if window_icon.isNull():
         window_icon = QIcon.fromTheme("applications-multimedia")
     app.setWindowIcon(window_icon)
+    install_exception_hook(app)
     window = MainWindow()
     window.show()
     return app.exec()

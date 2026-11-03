@@ -23,7 +23,7 @@ jadeDynastySavelocation = os.path.expanduser("~/Downloads/JadeDynasty")
 coilingDragonSavelocation = os.path.expanduser("~/Downloads/CoilingDragon")
 imortalsSavelOcation = os.path.expanduser("~/Videos/WorldOfImmortals")
 slaySaveLocale = os.path.expanduser("~/Videos/SlayTheGods")
-spiritSwordSaveLocation = os.path.expanduser("~/Videos/SpiritSword")
+spiritSwordSaveLocation = os.path.expanduser("~/Videos/SpiritSwords")
 aWillEternalSaveLocation = os.path.expanduser("~/Downloads/aWillEternal")
 
 # Default browser cookie configuration (e.g. 'brave', 'chrome', 'firefox', or None)

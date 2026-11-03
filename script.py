@@ -105,6 +105,32 @@ SESSION_SETTINGS = {
 DB_INITIALIZED = False
 
 
+def load_session_settings() -> None:
+    """Load persisted preferences from PostgreSQL into SESSION_SETTINGS."""
+    try:
+        saved = db.get_all_settings()
+    except Exception:
+        return
+    SESSION_SETTINGS["quality"] = saved.get(
+        "default_quality", SESSION_SETTINGS["quality"])
+    browser = str(saved.get("browser_cookies", "")).strip().lower()
+    SESSION_SETTINGS["browser"] = (
+        None if browser in ("", "none", "no", "off", "disabled", "false")
+        else browser)
+    try:
+        SESSION_SETTINGS["max_retries"] = max(1, int(saved.get("max_retries", "3")))
+    except (TypeError, ValueError):
+        SESSION_SETTINGS["max_retries"] = 3
+
+
+def save_session_setting(key: str, value: Any) -> None:
+    """Persist a CLI preference so the GUI and future sessions share it."""
+    try:
+        db.set_setting(key, str(value))
+    except Exception as exc:
+        console.print(f"[yellow]⚠ Could not save {key.replace('_', ' ')}: {exc}[/yellow]")
+
+
 def ensure_db_ready(quiet: bool = False):
     """Ensure PostgreSQL database exists, schema is migrated, and records are synced."""
     global DB_INITIALIZED
@@ -819,7 +845,8 @@ def interactive_settings():
 
         if action == "quality":
             SESSION_SETTINGS["quality"] = prompt_quality(SESSION_SETTINGS["quality"])
-            console.print(f"[green]Default quality set to {SESSION_SETTINGS['quality']}[/green]")
+            save_session_setting("default_quality", SESSION_SETTINGS["quality"])
+            console.print(f"[green]Default quality saved: {SESSION_SETTINGS['quality']}[/green]")
         elif action == "browser":
             b_choices = [
                 Choice("brave", value="brave"),
@@ -829,8 +856,12 @@ def interactive_settings():
                 Choice("None (Disabled)", value="none"),
             ]
             chosen_b = questionary.select("Select browser to read YouTube cookies from:", choices=b_choices).ask()
+            if chosen_b is None:
+                continue
             SESSION_SETTINGS["browser"] = None if chosen_b == "none" else chosen_b
-            console.print(f"[green]Browser cookie source set to: {SESSION_SETTINGS['browser']}[/green]")
+            save_session_setting("browser_cookies", chosen_b)
+            label = SESSION_SETTINGS["browser"] or "Disabled"
+            console.print(f"[green]Browser cookie source saved: {label}[/green]")
         elif action == "retries":
             new_r = questionary.text(
                 "Enter max retries (1-10):",
@@ -839,12 +870,14 @@ def interactive_settings():
             ).ask()
             if new_r:
                 SESSION_SETTINGS["max_retries"] = int(new_r)
-                console.print(f"[green]Max retries set to {SESSION_SETTINGS['max_retries']}[/green]")
+                save_session_setting("max_retries", new_r)
+                console.print(f"[green]Max retries saved: {SESSION_SETTINGS['max_retries']}[/green]")
 
 
 def main_interactive_menu():
     """Main application loop."""
     print_banner()
+    load_session_settings()
 
     while True:
         choices = [
@@ -914,8 +947,9 @@ Examples:
         "-q",
         "--quality",
         type=str,
-        default="720p",
-        help="Target video quality (e.g. 1080p, 720p, 480p, 360p, best). Default: 720p",
+        default=None,
+        help="Target video quality (e.g. 1080p, 720p, 480p, 360p, best). "
+             "Default: the saved setting (720p on first run)",
     )
     parser.add_argument("-u", "--url", nargs="+", help="One or more YouTube URLs to download")
     parser.add_argument("-d", "--dir", type=str, help="Destination directory for custom URLs")
@@ -923,8 +957,11 @@ Examples:
     parser.add_argument("-l", "--list", action="store_true", help="List all series, status, and exit")
     parser.add_argument("--register", type=str, help="Register a new Donghua series by name")
     parser.add_argument("--sync", action="store_true", help="Force sync PostgreSQL with urls.py and disk")
-    parser.add_argument("-b", "--browser", type=str, default=DEFAULT_BROWSER, help="Browser to read cookies from (e.g. brave, chrome)")
-    parser.add_argument("-r", "--retries", type=int, default=3, help="Max retry attempts per video (default: 3)")
+    parser.add_argument("-b", "--browser", type=str, default=None,
+                        help="Browser to read cookies from (brave, chrome, firefox, "
+                             "or none). Default: the saved setting")
+    parser.add_argument("-r", "--retries", type=int, default=None,
+                        help="Max retry attempts per video. Default: the saved setting")
     parser.add_argument("-i", "--interactive", action="store_true", help="Force interactive mode")
     parser.add_argument("--gui", action="store_true", help="Launch the Donghua Stream PyQt6 desktop app")
 
@@ -966,6 +1003,12 @@ def main():
     else:
         # Non-interactive CLI flags mode
         ensure_db_ready(quiet=True)
+        load_session_settings()
+        quality = args.quality or SESSION_SETTINGS["quality"]
+        browser = (args.browser if args.browser is not None
+                   else SESSION_SETTINGS["browser"])
+        retries = (args.retries if args.retries is not None
+                   else int(SESSION_SETTINGS["max_retries"]))
 
         if args.sync:
             interactive_resync_database()
@@ -989,9 +1032,9 @@ def main():
                 urls_list=args.url,
                 save_dir=save_dir,
                 series_name="Custom URLs",
-                quality=args.quality,
-                browser=args.browser,
-                max_retries=args.retries,
+                quality=quality,
+                browser=browser,
+                max_retries=retries,
             )
             sys.exit(0)
 
@@ -1018,10 +1061,10 @@ def main():
                 urls_list=target_urls,
                 save_dir=save_dir,
                 series_name=series_name,
-                quality=args.quality,
+                quality=quality,
                 series_id=series_id,
-                browser=args.browser,
-                max_retries=args.retries,
+                browser=browser,
+                max_retries=retries,
             )
             sys.exit(0)
 
@@ -1037,10 +1080,10 @@ def main():
                     urls_list=pending,
                     save_dir=s["save_dir"],
                     series_name=s["name"],
-                    quality=args.quality,
+                    quality=quality,
                     series_id=s["id"],
-                    browser=args.browser,
-                    max_retries=args.retries,
+                    browser=browser,
+                    max_retries=retries,
                 )
             sys.exit(0)
 

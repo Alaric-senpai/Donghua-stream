@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
-    QButtonGroup, QComboBox, QHBoxLayout, QLineEdit, QPushButton,
+    QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLineEdit, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -42,8 +42,20 @@ class HomeView(QWidget):
         self._list_mode = False
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(28, 14, 28, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ---- the entire page scrolls as one surface (hero included)
+        self.page_scroll = QScrollArea()
+        self.page_scroll.setWidgetResizable(True)
+        self.page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.page_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content_host = QWidget()
+        content_host.setObjectName("scrollHost")
+        content = QVBoxLayout(content_host)
+        content.setContentsMargins(28, 14, 28, 18)
+        content.setSpacing(12)
 
         # ---- page heading + view switcher
         head = QHBoxLayout()
@@ -71,18 +83,18 @@ class HomeView(QWidget):
         addb.setFixedHeight(34)
         addb.clicked.connect(self.add_requested.emit)
         head.addWidget(addb)
-        root.addLayout(head)
+        content.addLayout(head)
 
         self.hero = HeroSpotlight()
         self.hero.download_all.connect(self.series_download_all)
         self.hero.verify_disk.connect(self._verify)
         self.hero.open_requested.connect(self.series_opened)
         self.hero.add_requested.connect(self.add_requested)
-        root.addWidget(self.hero)
+        content.addWidget(self.hero)
 
         self.telemetry = TelemetryStrip()
         self.telemetry.sync_requested.connect(self.sync_requested.emit)
-        root.addWidget(self.telemetry)
+        content.addWidget(self.telemetry)
 
         # ---- filter chips + quick filter + sort
         tabs = QHBoxLayout()
@@ -121,31 +133,24 @@ class HomeView(QWidget):
         tabs.addWidget(self.sort_box)
         holder = QWidget()
         holder.setLayout(tabs)
-        root.addWidget(holder)
+        content.addWidget(holder)
 
-        # ---- scrollable catalog
-        self.stack_area = QScrollArea()
-        self.stack_area.setWidgetResizable(True)
-        self.stack_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        host = QWidget()
-        host.setObjectName("scrollHost")
-        self._host_lay = QVBoxLayout(host)
-        self._host_lay.setContentsMargins(0, 2, 4, 0)
-        self._host_lay.setSpacing(10)
+        # ---- catalog (lives in the same page-level scroll area)
         self.grid_host = PosterGrid()
         self.list_host = StackList(spacing=8)
         self.list_host.hide()
-        self._host_lay.addWidget(self.grid_host)
-        self._host_lay.addWidget(self.list_host)
+        content.addWidget(self.grid_host)
+        content.addWidget(self.list_host)
         self.empty = EmptyState(
             "▦", "Nothing here yet",
             "No series match this filter. Try another view or add a new donghua.",
             "＋  Add Donghua")
         self.empty.action_requested.connect(self.add_requested.emit)
-        self._host_lay.addWidget(self.empty)
-        self._host_lay.addStretch(1)
-        self.stack_area.setWidget(host)
-        root.addWidget(self.stack_area, 1)
+        content.addWidget(self.empty)
+        content.addStretch(1)
+
+        self.page_scroll.setWidget(content_host)
+        root.addWidget(self.page_scroll)
 
     # ---- mode / filter plumbing -------------------------------------------
     def set_mode(self, list_mode: bool) -> None:

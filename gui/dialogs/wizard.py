@@ -1,15 +1,17 @@
 """Three-step Add Donghua registration wizard."""
 import os
+import traceback
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QSpinBox, QStackedWidget, QTextEdit,
+    QLabel, QLineEdit, QSpinBox, QStackedWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
 import db
+from .error_dialog import report_error
 from ..components.primitives import btn, chip_tag, label_caps, mk_label
 from ..components.storage_card import StorageCard
 from ..theme import T_MUTED, T_ON_PRIMARY, T_PRIMARY, T_ROSE, T_SEC, app_stylesheet
@@ -393,14 +395,22 @@ class AddWizard(QDialog):
         try:
             os.makedirs(save_dir, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, "Invalid folder", f"Cannot create folder:\n{exc}")
+            report_error(
+                self, "Invalid folder",
+                f"The save folder could not be created:\n{exc}\n\n"
+                "Pick another folder or fix its permissions, then try again.",
+                traceback.format_exc())
             return
         entries = parse_bulk_urls(self.urls.toPlainText())
         try:
             series = db.create_series(
                 name, save_dir=save_dir, description=self.desc_in.toPlainText())
-        except Exception as exc:
-            QMessageBox.critical(self, "Database error", str(exc))
+        except Exception:
+            report_error(
+                self, "Database error",
+                "The series could not be saved to the catalog. Copy these "
+                "details when reporting it.",
+                traceback.format_exc())
             return
         sid = int(series["id"])
         n = self.start_at.value()

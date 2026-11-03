@@ -497,6 +497,23 @@ QTextEdit#console {{
     color: #cbd5e1;
     padding: 12px;
 }}
+QTextEdit#errorDetails {{
+    background-color: {T_CANVAS_SOFT};
+    border: 1px solid {T_LINE_SOFT};
+    border-radius: {R_SM}px;
+    font-family: "{F_MONO}";
+    font-size: 11px;
+    color: #cbd5e1;
+    padding: 12px;
+    selection-background-color: {T_PRIMARY};
+    selection-color: {T_ON_PRIMARY};
+}}
+QFrame#errorBanner {{
+    background-color: {T_ROSE_SOFT};
+    border: 1px solid {T_ROSE_LINE};
+    border-radius: {R_MD}px;
+}}
+QFrame#errorBanner QLabel {{ background: transparent; }}
 
 QCheckBox {{ color: {T_SEC}; font-size: 12px; spacing: 8px; }}
 QCheckBox:hover {{ color: {T_TEXT}; }}

@@ -14,6 +14,67 @@ from urls import extract_video_id
 
 
 # ==============================================================================
+# Archive helpers
+# ==============================================================================
+
+_ARCHIVE_NAME = "downloaded.txt"
+_DISABLED_BROWSERS = {"", "none", "no", "off", "disabled", "false"}
+
+
+def normalize_browser(browser: Optional[str]) -> Optional[str]:
+    """Turn the UI's "No cookies" sentinel into ``None`` for yt-dlp.
+
+    Passing the literal string ``"none"`` to yt-dlp makes it raise
+    ``ERROR: unsupported browser: "none"``, so every entry point funnels
+    browser values through this helper.
+    """
+    value = str(browser or "").strip().lower()
+    return None if value in _DISABLED_BROWSERS else value
+
+
+def ensure_archive_file(save_dir: str) -> str:
+    """Create the per-directory download archive even before the first save."""
+    save_dir = os.path.expanduser(save_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    archive_path = os.path.join(save_dir, _ARCHIVE_NAME)
+    if not os.path.exists(archive_path):
+        with open(archive_path, "a", encoding="utf-8"):
+            pass
+    return archive_path
+
+
+def read_archive_ids(save_dir: str) -> set:
+    """Read the archive as a set of video IDs (last token on each line)."""
+    archive_path = os.path.join(os.path.expanduser(save_dir), _ARCHIVE_NAME)
+    ids = set()
+    if not os.path.exists(archive_path):
+        return ids
+    try:
+        with open(archive_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts:
+                    ids.add(parts[-1])
+    except OSError:
+        pass
+    return ids
+
+
+def add_archive_id(save_dir: str, video_id: str) -> bool:
+    """Append a YouTube ID to ``downloaded.txt`` if it is not recorded yet."""
+    video_id = (video_id or "").strip()
+    # extract_video_id() returns the raw URL when it cannot find an ID.
+    if not video_id or "://" in video_id or " " in video_id:
+        return False
+    archive_path = ensure_archive_file(save_dir)
+    if video_id in read_archive_ids(save_dir):
+        return False
+    with open(archive_path, "a", encoding="utf-8") as f:
+        f.write(f"youtube {video_id}\n")
+    return True
+
+
+# ==============================================================================
 # Quality Definitions
 # ==============================================================================
 
@@ -42,10 +103,7 @@ def resolve_format_string(quality: Union[str, int]) -> tuple[str, str]:
     """
     if isinstance(quality, int):
         height = quality
-        return (
-            f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
-            f"{height}p",
-        )
+        return _format_for_height(height), f"{height}p"
 
     q_str = str(quality).strip().lower()
     if q_str in ("best", "max", "highest", "auto", "none"):
@@ -54,16 +112,28 @@ def resolve_format_string(quality: Union[str, int]) -> tuple[str, str]:
     cleaned = q_str.rstrip("p")
     try:
         height = int(cleaned)
-        return (
-            f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
-            f"{height}p",
-        )
+        return _format_for_height(height), f"{height}p"
     except ValueError:
         # Default fallback to 720p
-        return (
-            "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "720p (fallback)",
-        )
+        return _format_for_height(720), "720p (fallback)"
+
+
+def _format_for_height(height: int) -> str:
+    """Prefer the exact height, then the best stream at or below it.
+
+    ``height<=720`` is deliberate: it caps the download at the selected
+    quality and picks the highest available stream below that cap.  If the
+    source has no 720p rendition, a lower one is used instead of failing.
+    The final ``/best`` only runs when no capped format exists at all.
+    """
+    h = max(1, int(height))
+    return (
+        f"bestvideo[height={h}]+bestaudio/"
+        f"bestvideo[height<={h}]+bestaudio/"
+        f"best[height={h}]/"
+        f"best[height<={h}]/"
+        "best"
+    )
 
 
 # ==============================================================================
@@ -96,18 +166,8 @@ class DownloadSummary:
 
 def already_downloaded(save_dir: str, url: str) -> bool:
     """Check if a URL was already recorded in the download archive for save_dir."""
-    archive_path = os.path.join(save_dir, "downloaded.txt")
-    if not os.path.exists(archive_path):
-        return False
     vid = extract_video_id(url)
-    try:
-        with open(archive_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if vid in line:
-                    return True
-    except Exception:
-        pass
-    return False
+    return bool(vid) and vid in read_archive_ids(save_dir)
 
 
 # ==============================================================================
@@ -132,7 +192,7 @@ class VideoDownloader:
     ):
         self.quality = quality
         self.max_retries = max_retries
-        self.browser = browser
+        self.browser = normalize_browser(browser)
         self.write_subs = write_subs
         self.on_event = on_event
         self.cancel_check = cancel_check
@@ -144,6 +204,15 @@ class VideoDownloader:
     def _notify(self, event: str, **kwargs):
         if self.on_event:
             self.on_event(event, kwargs)
+
+    def _wait_for_retry(self, seconds: float) -> bool:
+        """Cancellation-aware backoff; returns True when cancellation was requested."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self.cancel_check and self.cancel_check():
+                return True
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        return bool(self.cancel_check and self.cancel_check())
 
     def _progress_hook(self, d: Dict[str, Any]):
         """yt-dlp progress hook: forwards live telemetry and honours cancellation."""
@@ -178,8 +247,9 @@ class VideoDownloader:
         quality: Optional[Union[str, int]] = None,
     ) -> DownloadSummary:
         """Download a list of video URLs into the target directory with configured quality."""
+        save_dir = os.path.expanduser(save_dir)
         os.makedirs(save_dir, exist_ok=True)
-        archive_file = os.path.join(save_dir, "downloaded.txt")
+        archive_file = ensure_archive_file(save_dir)
         chosen_quality = quality if quality is not None else self.quality
         format_str, quality_label = resolve_format_string(chosen_quality)
 
@@ -259,6 +329,10 @@ class VideoDownloader:
                     with yt_dlp.YoutubeDL(params=ydl_opts) as ydl:
                         ydl.download([clean_url])
 
+                    # yt-dlp normally writes the archive itself, but a
+                    # post-processing failure can leave a finished file
+                    # unrecorded.  Always reconcile after a successful run.
+                    add_archive_id(save_dir, extract_video_id(clean_url))
                     self._notify("success", url=clean_url, index=index, total=len(urls))
                     summary.succeeded.append(clean_url)
                     success = True
@@ -277,7 +351,10 @@ class VideoDownloader:
                     )
                     if attempt < self.max_retries and not (self.cancel_check and self.cancel_check()):
                         backoff = 2 * attempt
-                        time.sleep(backoff)
+                        if self._wait_for_retry(backoff):
+                            self._notify("cancelled", url=clean_url,
+                                         index=index, total=len(urls))
+                            return summary
 
             if not success:
                 self._notify(

@@ -1,14 +1,15 @@
 """Download Center: live telemetry, queue control and a colorized console."""
 from typing import Any, Dict, Optional
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QScrollArea, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 from ..components.empty_state import EmptyState
 from ..components.primitives import (
-    btn, chip_tag, eyebrow, label_caps, mk_label, styled_bar,
+    btn, chip_tag, eyebrow, icon_btn, label_caps, mk_label, styled_bar,
 )
 from ..components.queue_row import QueueRow
 from ..components.stack_list import StackList
@@ -186,6 +187,48 @@ class DownloadsView(QWidget):
         qarea.setWidget(qhost)
         root.addWidget(qarea)
 
+        # ---- copyable error banner (hidden until something fails)
+        self.error_banner = QFrame()
+        self.error_banner.setObjectName("errorBanner")
+        eb = QHBoxLayout(self.error_banner)
+        eb.setContentsMargins(12, 8, 12, 8)
+        eb.setSpacing(8)
+        warn = QLabel("!")
+        warn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        warn.setFixedSize(24, 24)
+        warn.setStyleSheet(
+            f"color: {T_ROSE2}; border: 1px solid {T_ROSE2};"
+            "border-radius: 12px; font-size: 14px; font-weight: 900;"
+            "background: rgba(244,63,94,25);")
+        eb.addWidget(warn, 0, Qt.AlignmentFlag.AlignTop)
+        err_col = QVBoxLayout()
+        err_col.setSpacing(1)
+        self.error_title = mk_label("Download error", "titleSm")
+        self.error_msg = mk_label("", "small", wrap=True)
+        self.error_msg.setSizePolicy(
+            self.error_msg.sizePolicy().horizontalPolicy(),
+            self.error_msg.sizePolicy().verticalPolicy())
+        err_col.addWidget(self.error_title)
+        err_col.addWidget(self.error_msg)
+        eb.addLayout(err_col, 1)
+        self.copy_err_btn = btn(
+            "Copy Error", "danger", "Copy the full error report", small=True)
+        self.copy_err_btn.setFixedHeight(28)
+        self.copy_err_btn.setIcon(icon("copy", T_ROSE2, 13))
+        self.copy_err_btn.setIconSize(QSize(13, 13))
+        self.copy_err_btn.clicked.connect(self._copy_error)
+        eb.addWidget(self.copy_err_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        dismiss = icon_btn("", "Dismiss this error")
+        dismiss.setFixedSize(28, 28)
+        dismiss.setIcon(icon("close", T_SEC, 13))
+        dismiss.setIconSize(QSize(13, 13))
+        dismiss.clicked.connect(self.error_banner.hide)
+        eb.addWidget(dismiss, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.error_banner.hide()
+        root.addWidget(self.error_banner)
+        self._last_error_title = ""
+        self._last_error_details = ""
+
         # ---- console
         term_card = QFrame()
         term_card.setObjectName("card")
@@ -195,6 +238,14 @@ class DownloadsView(QWidget):
         term_head = QHBoxLayout()
         term_head.addWidget(label_caps("yt-dlp console"))
         term_head.addStretch(1)
+        self.copy_log_btn = btn(
+            "Copy Console", "ghost", "Copy every line currently in the console",
+            small=True)
+        self.copy_log_btn.setFixedHeight(24)
+        self.copy_log_btn.setIcon(icon("copy", T_SEC, 12))
+        self.copy_log_btn.setIconSize(QSize(12, 12))
+        self.copy_log_btn.clicked.connect(self._copy_console)
+        term_head.addWidget(self.copy_log_btn)
         self.term_chip = chip_tag("tail -f downloads.log", "default")
         term_head.addWidget(self.term_chip)
         tl2.addLayout(term_head)
@@ -208,6 +259,40 @@ class DownloadsView(QWidget):
         self._peak_speed = 0.0
         self._last_done = 0
         self._last_total = 0
+
+    # ---- copyable error reporting -----------------------------------------
+    def _show_error(self, title: str, summary: str, details: str) -> None:
+        self._last_error_title = title
+        self._last_error_details = details.strip()
+        self.error_title.setText(title)
+        self.error_msg.setText(summary)
+        self.error_banner.show()
+
+    def _flash_button(self, button: QWidget, original: str) -> None:
+        try:
+            button.setText("Copied")
+        except RuntimeError:
+            return
+        QTimer.singleShot(1600, lambda b=button, o=original: self._restore_button(b, o))
+
+    @staticmethod
+    def _restore_button(button: QWidget, original: str) -> None:
+        try:
+            button.setText(original)
+        except RuntimeError:
+            pass
+
+    def _copy_error(self) -> None:
+        if not self._last_error_details:
+            return
+        text = f"{self._last_error_title}\n\n{self._last_error_details}"
+        QApplication.clipboard().setText(text)
+        self._flash_button(self.copy_err_btn, "Copy Error")
+
+    def _copy_console(self) -> None:
+        text = self.terminal.toPlainText().strip() or "No console output yet."
+        QApplication.clipboard().setText(text)
+        self._flash_button(self.copy_log_btn, "Copy Console")
 
     def on_state_changed(self) -> None:
         m = self.manager
@@ -239,7 +324,10 @@ class DownloadsView(QWidget):
 
     def on_event(self, ev: str, data: Dict[str, Any]) -> None:
         m = self.manager
-        if ev == "progress" and data.get("status") == "downloading":
+        task_name = m.active_task.series_name if m.active_task else "Download"
+        if ev == "start":
+            self.error_banner.hide()
+        elif ev == "progress" and data.get("status") == "downloading":
             speed = float(data.get("speed") or 0)
             done = float(data.get("downloaded_bytes") or 0)
             total = float(data.get("total_bytes") or 0)
@@ -260,21 +348,53 @@ class DownloadsView(QWidget):
             self.step_chip.setText(f"Attempt {data.get('attempt')}/{data.get('max_retries')}")
             self.np_title.setText(
                 f"{data.get('index', '?')}/{data.get('total', '?')}  ·  "
-                + (m.active_task.series_name if m.active_task else "Download"))
+                + task_name)
         elif ev == "skip":
             self.tile_eta.set("00:00", "already in archive — skipped")
         elif ev == "retry_error":
             self.step_chip.setText("Retrying…")
+            attempt = data.get("attempt", "?")
+            max_retries = data.get("max_retries", "?")
+            url = str(data.get("url") or "")
+            error = str(data.get("error") or "Unknown error")
+            self._show_error(
+                "Download attempt failed",
+                f"{task_name} · attempt {attempt}/{max_retries}. Retrying…",
+                f"Series: {task_name}\nURL: {url}\n"
+                f"Attempt: {attempt}/{max_retries}\n\n{error}")
+        elif ev == "failure":
+            self.step_chip.setText("Failed")
+            url = str(data.get("url") or "")
+            error = str(data.get("error") or "Unknown error")
+            self._show_error(
+                "Episode failed",
+                f"{task_name} · this video could not be downloaded.",
+                f"Series: {task_name}\nURL: {url}\n\n{error}")
         elif ev == "success":
             self.step_chip.setText("Completed ✔")
         elif ev == "summary":
             if "fatal" in data:
-                self.tile_rate.set("ERR", str(data["fatal"])[:40])
+                fatal = str(data["fatal"])
+                self.tile_rate.set("ERR", fatal[:40])
+                self.terminal.append(terminal_html(f"[error] {fatal}"))
+                self._show_error(
+                    "Download engine error",
+                    f"{task_name} · the download engine stopped unexpectedly.",
+                    f"Series: {task_name}\n\n{fatal}")
             else:
                 ok = len(data.get("succeeded", []))
-                bad = len(data.get("failed", []))
+                failed = data.get("failed", [])
+                bad = len(failed)
                 self.tile_rate.set(f"{ok} ok", f"{bad} failed · {ok + bad} processed")
                 self._peak_speed = 0.0
+                if bad:
+                    details = "\n\n".join(
+                        f"{f.get('url', '')}\n{f.get('error', '')}"
+                        for f in failed if isinstance(f, dict))
+                    self._show_error(
+                        f"{bad} episode(s) failed",
+                        f"{task_name} · {ok} saved. Copy the error details below.",
+                        details)
 
     def on_log_line(self, line: str) -> None:
         self.terminal.append(terminal_html(line))

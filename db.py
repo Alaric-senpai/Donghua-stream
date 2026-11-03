@@ -117,7 +117,7 @@ def init_schema():
 
 def get_archive_downloaded_ids(save_dir: str) -> set:
     """Read video IDs already marked as downloaded in the directory's downloaded.txt."""
-    archive_path = os.path.join(save_dir, "downloaded.txt")
+    archive_path = os.path.join(os.path.expanduser(save_dir), "downloaded.txt")
     if not os.path.exists(archive_path):
         return set()
     ids = set()
@@ -132,8 +132,120 @@ def get_archive_downloaded_ids(save_dir: str) -> set:
     return ids
 
 
+# ==============================================================================
+# Download archive maintenance
+# ==============================================================================
+
+MEDIA_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov", ".m4v")
+
+
+def _valid_video_id(video_id: Any) -> bool:
+    value = str(video_id or "").strip()
+    return bool(value) and "://" not in value and " " not in value
+
+
+def _media_files(save_dir: str) -> List[str]:
+    try:
+        return [
+            f for f in os.listdir(save_dir)
+            if os.path.isfile(os.path.join(save_dir, f))
+            and f.lower().endswith(MEDIA_EXTENSIONS)
+            and not f.lower().endswith(".part")
+        ]
+    except OSError:
+        return []
+
+
+def _normalized_title(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _append_archive_ids(save_dir: str, ids: set) -> int:
+    """Write missing IDs into the directory archive. Returns how many were added."""
+    ids = {str(i).strip() for i in ids if _valid_video_id(i)}
+    if not ids:
+        return 0
+    existing = get_archive_downloaded_ids(save_dir)
+    missing = sorted(ids - existing)
+    if not missing:
+        return 0
+    archive_path = os.path.join(os.path.expanduser(save_dir), "downloaded.txt")
+    os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+    with open(archive_path, "a", encoding="utf-8") as f:
+        for vid in missing:
+            f.write(f"youtube {vid}\n")
+    return len(missing)
+
+
+def repair_archives() -> Dict[str, int]:
+    """Make every existing series folder carry a usable ``downloaded.txt``.
+
+    Existing media cannot always be mapped back to a URL because older
+    downloads did not store the YouTube ID in the filename.  This function is
+    deliberately conservative: it records episodes the database already marks
+    as downloaded, matches obvious titles/episode numbers, and handles the
+    unambiguous one-episode/one-file case.  Every folder also gets an archive
+    file so future downloads never start without one.
+    """
+    created = 0
+    added = 0
+    scanned = 0
+    for series in get_all_series():
+        save_dir = os.path.expanduser(str(series.get("save_dir") or ""))
+        if not save_dir or not os.path.isdir(save_dir):
+            continue
+        scanned += 1
+        archive_path = os.path.join(save_dir, "downloaded.txt")
+        existed = os.path.exists(archive_path)
+        ids = get_archive_downloaded_ids(save_dir) if existed else set()
+        found = set(ids)
+        episodes = get_episodes(int(series["id"]))
+        media = _media_files(save_dir)
+
+        for ep in episodes:
+            vid = ep.get("video_id")
+            if ep.get("status") == "downloaded" and _valid_video_id(vid):
+                found.add(str(vid))
+            if not _valid_video_id(vid):
+                continue
+            title = _normalized_title(ep.get("title"))
+            if title and len(title) >= 4:
+                if any(title in _normalized_title(name) for name in media):
+                    found.add(str(vid))
+            number = ep.get("episode_number")
+            if number and media:
+                pattern = rf"\bep(?:isode)?\s*0*{int(number)}\b"
+                if any(re.search(pattern, name, re.IGNORECASE) for name in media):
+                    found.add(str(vid))
+
+        # A single registered episode with a single media file is unambiguous.
+        if len(episodes) == 1 and len(media) == 1:
+            vid = episodes[0].get("video_id")
+            if _valid_video_id(vid):
+                found.add(str(vid))
+
+        # Do not guess when several episodes and several files exist: sorted
+        # filenames do not reliably correspond to catalog order, and marking
+        # the wrong episode downloaded would silently skip it forever.
+
+        if not existed:
+            os.makedirs(save_dir, exist_ok=True)
+            with open(archive_path, "a", encoding="utf-8"):
+                pass
+            created += 1
+        added += _append_archive_ids(save_dir, found)
+
+    return {"folders_scanned": scanned, "archives_created": created,
+            "ids_added": added}
+
+
 def sync_existing_records() -> Dict[str, int]:
     """Sync all series and episode URLs from urls.py into PostgreSQL.
+
+    Uses the static ``SERIES_CATALOG`` rather than
+    ``urls.get_all_series()``: the latter reads from this database, so
+    trusting it here would make the sync circular and prevent save-path
+    fixes in ``urls.py`` from ever reaching an existing row.
 
     Also synchronizes status against existing downloaded.txt files.
     """
@@ -144,7 +256,7 @@ def sync_existing_records() -> Dict[str, int]:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            for s in file_urls.get_all_series():
+            for s in file_urls.SERIES_CATALOG.values():
                 cur.execute(
                     """
                     INSERT INTO series (key, name, save_dir, description)
@@ -193,7 +305,12 @@ def init_db() -> Dict[str, Any]:
     """Initialize database: create db if missing, run migrations, and sync existing records."""
     db_created = ensure_database_exists()
     init_schema()
+    ensure_default_settings()
     sync_stats = sync_existing_records()
+    # Fill in archives left behind by older versions, then update every
+    # episode status from the repaired archives in one pass.
+    repair_archives()
+    sync_all_archives()
     return {
         "db_created": db_created,
         "synced_series": sync_stats["series"],
@@ -530,6 +647,30 @@ def sync_series_with_archive(series_id: int) -> int:
     return updated
 
 
+def sync_all_archives() -> int:
+    """Read every series archive once and apply all status changes together."""
+    total = 0
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for series in get_all_series():
+                ids = get_archive_downloaded_ids(series.get("save_dir", ""))
+                if not ids:
+                    continue
+                cur.execute(
+                    """
+                    UPDATE episodes
+                    SET status = 'downloaded',
+                        downloaded_at = COALESCE(downloaded_at, CURRENT_TIMESTAMP)
+                    WHERE series_id = %s AND video_id = ANY(%s)
+                      AND status != 'downloaded';
+                    """,
+                    (int(series["id"]), list(ids)),
+                )
+                total += cur.rowcount
+        conn.commit()
+    return total
+
+
 def delete_episode(episode_id: int) -> bool:
     """Delete an episode record from PostgreSQL."""
     with get_connection() as conn:
@@ -590,7 +731,24 @@ DEFAULT_SETTINGS = {
     "default_container": "mp4",
     "sub_langs": "en",
     "rate_limit_mb": "0",
+    "per_series_subfolder": "1",
 }
+
+
+def ensure_default_settings() -> None:
+    """Insert every shipped setting so the table is complete from day one."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for key, value in DEFAULT_SETTINGS.items():
+                cur.execute(
+                    """
+                    INSERT INTO app_settings (key, value)
+                    VALUES (%s, %s)
+                    ON CONFLICT (key) DO NOTHING;
+                    """,
+                    (key, str(value)),
+                )
+        conn.commit()
 
 
 def get_setting(key: str, default: Optional[str] = None) -> str:

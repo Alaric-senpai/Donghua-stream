@@ -1,5 +1,6 @@
 """MainWindow: assembles rail, header, pages, queue and dialogs."""
 import os
+import traceback
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt6.QtCore import QUrl
@@ -14,6 +15,7 @@ from .components.header_bar import HeaderBar
 from .components.sidebar import Sidebar
 from .components.toast import Toast
 from .dialogs.quick_url import QuickUrlDialog
+from .dialogs.error_dialog import report_error
 from .dialogs.wizard import AddWizard
 from .infrastructure.db_worker import DbWorker
 from .infrastructure.download_queue import DownloadManager, DownloadTask
@@ -138,7 +140,7 @@ class MainWindow(QMainWindow):
 
         # ---- manager wiring
         self.manager.state_changed.connect(self._on_queue_state)
-        self.manager.event.connect(self._on_dl_event)
+        self.manager.download_event.connect(self._on_dl_event)
         self.manager.log_line.connect(self.downloads_view.on_log_line)
         self.manager.task_done.connect(self._on_task_done)
 
@@ -153,7 +155,21 @@ class MainWindow(QMainWindow):
         self.refresh_engine_versions()
         self.navigateTo("home")
         # bootstrap DB (create if missing, schema, archive re-sync), then first load
-        self.run_db(lambda: db.init_db(), lambda res: self.refresh_full())
+        def _bootstrapped(res) -> None:
+            if not isinstance(res, Exception):
+                # A first run creates the DB after MainWindow was built, so
+                # re-read settings now that the app_settings rows exist.
+                self.settings = load_settings()
+                self.settings_view.s = dict(self.settings)
+                self.settings_view._loading = True
+                try:
+                    self.settings_view._sync_controls()
+                finally:
+                    self.settings_view._loading = False
+                self.header.set_quality_silent(
+                    self.settings.get("default_quality", "720p"))
+            self.refresh_full()
+        self.run_db(lambda: db.init_db(), _bootstrapped)
 
     # ---- helpers ------------------------------------------------------------
     def run_db(self, fn: Callable[[], Any], callback: Callable[[Any], None]) -> None:
@@ -167,8 +183,12 @@ class MainWindow(QMainWindow):
             if t == token:
                 try:
                     callback(res)
-                except Exception as exc:  # keep the GUI alive on handler errors
-                    self.statusToast.show_message(f"UI refresh failed: {exc}", False)
+                except Exception:  # keep the GUI alive on handler errors
+                    report_error(
+                        self, "Interface error",
+                        "The action completed, but refreshing the interface failed. "
+                        "Copy these details when reporting it.",
+                        traceback.format_exc())
 
         worker.done.connect(_on_done)
         worker.finished.connect(worker.deleteLater)
@@ -237,13 +257,20 @@ class MainWindow(QMainWindow):
         def _loaded(res) -> None:
             if isinstance(res, Exception):
                 self.sidebar.set_db_ok(False)
-                self.statusToast.show_message(f"Database error: {res}", False)
+                report_error(
+                    self, "Database error",
+                    "The catalog could not be loaded. Copy these details when reporting it.",
+                    f"{type(res).__name__}: {res}")
                 return
             series, posters = res
             self.sidebar.set_db_ok(True)
             self.home_view.load(series, posters)
             self.library_view.load(series, posters)
-            if self._detail_sid and focus_sid in (None, self._detail_sid):
+            # Refresh the detail page in place, but never steal navigation
+            # away from Downloads/Settings after a background refresh.
+            on_detail = self.stack.currentIndex() == self._page_by_key["detail"]
+            if (self._detail_sid and on_detail
+                    and focus_sid in (None, self._detail_sid)):
                 self.open_series(self._detail_sid)
             done = sum(int(s.get("downloaded_episodes", 0) or 0) for s in series)
             total = sum(int(s.get("total_episodes", 0) or 0) for s in series)
@@ -257,8 +284,14 @@ class MainWindow(QMainWindow):
         self.run_db(lambda: (db.get_all_series(), db.get_series_poster_ids()), _loaded)
 
     def start_size_scan(self, series: List[Dict[str, Any]]) -> None:
-        if self._scanner and self._scanner.isRunning():
-            return
+        scanner = self._scanner
+        if scanner is not None:
+            try:
+                if scanner.isRunning():
+                    return
+            except RuntimeError:
+                # deleteLater() already removed the C++ side of a finished scan.
+                self._scanner = None
         jobs = [(s["id"], s.get("save_dir", "")) for s in series if s.get("save_dir")]
         if not jobs:
             return
@@ -274,8 +307,21 @@ class MainWindow(QMainWindow):
                 self.detail_view.update_disk_line(total)
 
         self._scanner.scanned.connect(_on_scan)
-        self._scanner.finished.connect(self._scanner.deleteLater)
+        # Drop the Python reference too: keeping a wrapper around after
+        # deleteLater() makes the next refresh raise "C++ object deleted".
+        self._scanner.finished.connect(self._release_scanner)
         self._scanner.start()
+
+    def _release_scanner(self) -> None:
+        scanner = self.sender()
+        if scanner is self._scanner:
+            self._scanner = None
+        if isinstance(scanner, SizeScanner):
+            try:
+                scanner.deleteLater()
+            except RuntimeError:
+                # Already destroyed by the Qt parent; nothing left to clean.
+                pass
 
     # ---- thumbnails ------------------------------------------------------------
     def _on_thumb_loaded(self, vid: str, pix: QPixmap) -> None:
@@ -518,7 +564,7 @@ class MainWindow(QMainWindow):
         # Ask the engine to stop and let threads finish so Qt does not
         # destroy live QThreads on shutdown.
         try:
-            self.manager.cancel_current()
+            self.manager.shutdown()
         except Exception:
             pass
         for w in list(self._workers):
@@ -529,11 +575,6 @@ class MainWindow(QMainWindow):
         if self._scanner is not None:
             try:
                 self._scanner.wait(300)
-            except Exception:
-                pass
-        if self.manager.active:
-            try:
-                self.manager.active.wait(700)
             except Exception:
                 pass
         super().closeEvent(ev)

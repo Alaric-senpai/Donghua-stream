@@ -51,7 +51,9 @@ class DownloadTask:
 class DownloadWorker(QThread):
     """Executes one DownloadTask through the shared VideoDownloader engine."""
 
-    event = pyqtSignal(str, dict)
+    # NOTE: never name a signal ``event`` on a QObject: it shadows
+    # QObject.event() and Qt aborts with "native Qt signal is not callable".
+    download_event = pyqtSignal(str, dict)
     line = pyqtSignal(str)
 
     def __init__(self, task: DownloadTask, settings: Dict[str, str], parent=None):
@@ -69,14 +71,14 @@ class DownloadWorker(QThread):
             rate_mb = float(s.get("rate_limit_mb", "0") or 0)
         except (TypeError, ValueError):
             rate_mb = 0.0
-        ydl_log = QuietYdlLogger(self)
+        ydl_log = QuietYdlLogger()
         ydl_log.line.connect(self.line)  # type: ignore[arg-type]
         engine = VideoDownloader(
             quality=self.task.quality if self.task.quality else s.get("default_quality", "720p"),
             max_retries=int(s.get("max_retries", "3") or 3),
             browser=(s.get("browser_cookies", "brave") or "").strip().lower(),
             write_subs=True,
-            on_event=lambda ev, data: self.event.emit(ev, dict(data or {})),
+            on_event=lambda ev, data: self.download_event.emit(ev, dict(data or {})),
             cancel_check=self._cancel_flag.is_set,
             ydl_logger=ydl_log,
             container=s.get("default_container", "mp4") or "mp4",
@@ -86,14 +88,14 @@ class DownloadWorker(QThread):
         try:
             summary = engine.download_urls(self.task.urls, self.task.save_dir,
                                            quality=self.task.quality)
-            self.event.emit("summary", {
+            self.download_event.emit("summary", {
                 "total": summary.total,
                 "succeeded": list(summary.succeeded),
                 "failed": [dict(f) for f in summary.failed],
                 "skipped": list(summary.skipped),
             })
         except Exception as exc:  # keep the GUI alive if the engine explodes
-            self.event.emit("summary", {"fatal": str(exc)})
+            self.download_event.emit("summary", {"fatal": str(exc)})
 
 
 class DownloadManager(QObject):
@@ -104,7 +106,7 @@ class DownloadManager(QObject):
     """
 
     state_changed = pyqtSignal()
-    event = pyqtSignal(str, dict)          # forwarded downloader events
+    download_event = pyqtSignal(str, dict)  # forwarded downloader events
     log_line = pyqtSignal(str)
     task_done = pyqtSignal(object, bool)   # (task, ok)
 
@@ -156,6 +158,20 @@ class DownloadManager(QObject):
             self.log_line.emit("[status] Cancel request sent to yt-dlp…")
             self.active.cancel()
 
+    def shutdown(self, wait_ms: int = 3000) -> None:
+        """Stop the active worker before Qt tears down its parent objects."""
+        self.paused = True
+        worker = self.active
+        if worker is None:
+            return
+        worker.cancel()
+        if worker.wait(wait_ms):
+            return
+        # Last-resort guard for a wedged network call. The process is exiting,
+        # so a partially written file is preferable to an abort in QThread.
+        worker.terminate()
+        worker.wait(800)
+
     def busy(self) -> bool:
         return self.active is not None
 
@@ -174,7 +190,7 @@ class DownloadManager(QObject):
         )
         self.state_changed.emit()
         worker = DownloadWorker(task, self.settings, self)
-        worker.event.connect(self._on_event)
+        worker.download_event.connect(self._on_event)
         worker.line.connect(self.log_line)  # type: ignore[arg-type]
         worker.finished.connect(self._on_worker_finished)
         self.active = worker
@@ -186,7 +202,7 @@ class DownloadManager(QObject):
             total = float(data.get("total_bytes") or 0)
             done = float(data.get("downloaded_bytes") or 0)
             task.progress = (done / total) if total > 0 else 0.0
-        self.event.emit(ev, data)
+        self.download_event.emit(ev, data)
         # Re-broadcast a snapshot of the running state for view refreshes.
         self.state_changed.emit()
 
