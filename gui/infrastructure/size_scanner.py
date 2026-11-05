@@ -14,9 +14,13 @@ class SizeScanner(QThread):
 
     def run(self):
         for series_id, path in self.jobs:
+            if self.isInterruptionRequested():
+                return
             total = 0
             try:
                 for root, _dirs, files in os.walk(os.path.expanduser(path)):
+                    if self.isInterruptionRequested():
+                        return
                     for f in files:
                         try:
                             total += os.path.getsize(os.path.join(root, f))

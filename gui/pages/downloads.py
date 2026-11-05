@@ -34,9 +34,9 @@ def terminal_html(line: str) -> str:
     }
     safe = (line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
     for tag, col in tag_colors.items():
-        t = tag.replace("[", "\\[").replace("]", "\\]")
         if tag in safe:
-            safe = safe.replace(t, f"<span style='color:{col};font-weight:700'>{tag}</span>", 1)
+            safe = safe.replace(
+                tag, f"<span style='color:{col};font-weight:700'>{tag}</span>", 1)
             break
     return f"<span style='color:#cbd5e1'>{safe}</span>"
 
@@ -327,23 +327,43 @@ class DownloadsView(QWidget):
         task_name = m.active_task.series_name if m.active_task else "Download"
         if ev == "start":
             self.error_banner.hide()
-        elif ev == "progress" and data.get("status") == "downloading":
+        elif ev == "progress" and data.get("status") in ("downloading",
+                                                         "stream_finished"):
+            status = str(data.get("status"))
             speed = float(data.get("speed") or 0)
             done = float(data.get("downloaded_bytes") or 0)
             total = float(data.get("total_bytes") or 0)
-            self._peak_speed = max(self._peak_speed, speed)
-            self.tile_rate.set(speed_text(speed), "current speed")
+            if status == "downloading":
+                self._peak_speed = max(self._peak_speed, speed)
+                self.tile_rate.set(speed_text(speed), "current speed")
+                self.tile_eta.set(format_eta(data.get("eta")), "time remaining")
+                self.chip_speed.setText(f"Bandwidth: {speed_text(speed)}")
+                self.step_chip.setText("Downloading")
+            else:
+                done_streams = data.get("formats_done", "?")
+                total_streams = data.get("formats_total", "?")
+                self.tile_rate.set("—", "waiting for next stream")
+                self.tile_eta.set("--:--", "more data to fetch")
+                self.step_chip.setText(
+                    f"Stream {done_streams}/{total_streams} saved")
             self.tile_peak.set(speed_text(self._peak_speed), "peak this run")
             self.tile_xfer.set(human_size(done), f"of {human_size(total)}")
-            self.tile_eta.set(format_eta(data.get("eta")), "time remaining")
-            self.chip_speed.setText(f"Bandwidth: {speed_text(speed)}")
-            self.step_chip.setText("Downloading")
             self.np_bar.setValue(int(100 * done / total) if total else 0)
             if total:
                 self._last_done, self._last_total = done, total
         elif ev == "progress" and data.get("status") == "finished":
-            self.step_chip.setText("Post-processing")
-            self.tile_eta.set("00:00", "saving…")
+            done = float(data.get("downloaded_bytes") or 0)
+            total = float(data.get("total_bytes") or 0)
+            self.step_chip.setText("Finalizing")
+            self.tile_eta.set("--:--", "merging streams…")
+            self.tile_xfer.set(human_size(done), f"of {human_size(total)}")
+            self.np_bar.setValue(100)
+        elif ev == "postprocess":
+            if data.get("status") == "started":
+                name = str(data.get("postprocessor") or "Post-processing")
+                self.step_chip.setText(
+                    "Merging streams" if "Merger" in name else f"{name}…")
+                self.tile_eta.set("--:--", "post-processing")
         elif ev == "attempt":
             self.step_chip.setText(f"Attempt {data.get('attempt')}/{data.get('max_retries')}")
             self.np_title.setText(
@@ -352,24 +372,30 @@ class DownloadsView(QWidget):
         elif ev == "skip":
             self.tile_eta.set("00:00", "already in archive — skipped")
         elif ev == "retry_error":
-            self.step_chip.setText("Retrying…")
+            # An attempt-level error is not a final failure: yt-dlp has its
+            # own client fallbacks and the engine is about to retry.  Keep
+            # the red banner reserved for the final summary.
+            self.error_banner.hide()
             attempt = data.get("attempt", "?")
             max_retries = data.get("max_retries", "?")
-            url = str(data.get("url") or "")
-            error = str(data.get("error") or "Unknown error")
-            self._show_error(
-                "Download attempt failed",
-                f"{task_name} · attempt {attempt}/{max_retries}. Retrying…",
-                f"Series: {task_name}\nURL: {url}\n"
-                f"Attempt: {attempt}/{max_retries}\n\n{error}")
+            delay = data.get("delay")
+            error = str(data.get("error") or "Unknown error").strip()
+            first_line = error.splitlines()[0][:240] if error else "Unknown error"
+            wait = f" in {int(delay)}s" if isinstance(delay, (int, float)) else ""
+            self.step_chip.setText(f"Retrying {attempt}/{max_retries}")
+            self.terminal.append(terminal_html(
+                f"[status] Attempt {attempt}/{max_retries} did not complete"
+                f"{wait} — retrying: {first_line}"))
         elif ev == "failure":
-            self.step_chip.setText("Failed")
+            # All retries for this video are exhausted.  Do not raise the
+            # final error banner yet: the queue may still be downloading
+            # more episodes, and the summary at the end reports everything.
             url = str(data.get("url") or "")
-            error = str(data.get("error") or "Unknown error")
-            self._show_error(
-                "Episode failed",
-                f"{task_name} · this video could not be downloaded.",
-                f"Series: {task_name}\nURL: {url}\n\n{error}")
+            error = str(data.get("error") or "Unknown error").strip()
+            first_line = error.splitlines()[0][:240] if error else "Unknown error"
+            self.step_chip.setText("Episode failed — continuing")
+            self.terminal.append(terminal_html(
+                f"[error] Gave up on {url} after all retries: {first_line}"))
         elif ev == "success":
             self.step_chip.setText("Completed ✔")
         elif ev == "summary":

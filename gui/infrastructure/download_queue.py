@@ -198,16 +198,19 @@ class DownloadManager(QObject):
 
     def _on_event(self, ev: str, data: dict) -> None:
         task = self.active_task
-        if task and ev == "progress" and data.get("status") == "downloading":
+        if task and ev == "progress" and data.get("status") in (
+                "downloading", "stream_finished"):
             total = float(data.get("total_bytes") or 0)
             done = float(data.get("downloaded_bytes") or 0)
             task.progress = (done / total) if total > 0 else 0.0
+        elif task and ev == "progress" and data.get("status") == "finished":
+            task.progress = 1.0
         self.download_event.emit(ev, data)
         # Re-broadcast a snapshot of the running state for view refreshes.
         self.state_changed.emit()
 
     def _on_worker_finished(self) -> None:
-        task, worker = self.active_task, self.active
+        task = self.active_task
         self.active, self.active_task = None, None
         if task is not None:
             task.status = "finished"

@@ -6,8 +6,8 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QScrollArea, QSizePolicy, QSpinBox,
-    QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
 import db

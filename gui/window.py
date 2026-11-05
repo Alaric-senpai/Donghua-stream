@@ -520,6 +520,10 @@ class MainWindow(QMainWindow):
         elif ev == "attempt":
             self.header.set_active_text("1 Active", True)
             self.status_state.setText("Status: Downloading")
+        elif ev == "progress" and data.get("status") == "stream_finished":
+            self.status_state.setText("Status: Fetching next stream")
+        elif ev == "postprocess" and data.get("status") == "started":
+            self.status_state.setText("Status: Merging streams")
         elif ev == "success":
             self.status_state.setText("Status: Saved")
         elif ev == "finish":
@@ -681,13 +685,24 @@ class MainWindow(QMainWindow):
             pass
         for w in list(self._workers):
             try:
-                w.wait(400)
-            except Exception:
+                if not w.isRunning():
+                    continue
+                w.requestInterruption()
+                if not w.wait(1500):
+                    # Last resort during shutdown: a blocked psycopg2 call
+                    # cannot be cancelled cooperatively.
+                    w.terminate()
+                    w.wait(500)
+            except RuntimeError:
+                # The C++ object was already deleted after the worker finished.
                 pass
         if self._scanner is not None:
             try:
-                self._scanner.wait(300)
-            except Exception:
+                self._scanner.requestInterruption()
+                if not self._scanner.wait(1500):
+                    self._scanner.terminate()
+                    self._scanner.wait(500)
+            except RuntimeError:
                 pass
         super().closeEvent(ev)
 

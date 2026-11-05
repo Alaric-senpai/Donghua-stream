@@ -333,8 +333,14 @@ class ExploreView(QWidget):
 
     def shutdown(self, wait_ms: int = 2000) -> None:
         worker = self._worker
-        if worker is not None and worker.isRunning():
-            worker.wait(wait_ms)
+        if worker is None or not worker.isRunning():
+            return
+        worker.requestInterruption()
+        if worker.wait(wait_ms):
+            return
+        # The process is exiting and Qt cannot destroy a running QThread.
+        worker.terminate()
+        worker.wait(500)
 
     # ---- search / load ----------------------------------------------------
     def _submit_search(self) -> None:

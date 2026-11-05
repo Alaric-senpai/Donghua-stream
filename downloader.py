@@ -5,7 +5,6 @@ archive tracking, retries with backoff, and progress reporting.
 """
 
 import os
-import sys
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Dict, Any, Union
@@ -72,6 +71,33 @@ def add_archive_id(save_dir: str, video_id: str) -> bool:
     with open(archive_path, "a", encoding="utf-8") as f:
         f.write(f"youtube {video_id}\n")
     return True
+
+
+def final_output_path(info: Any) -> str:
+    """Return the final (post-merge) filepath from a yt-dlp info dict.
+
+    ``download()`` discards the info dict, so the engine uses
+    ``extract_info(download=True)`` and checks this path before declaring a
+    video successful.  This prevents a partially merged multi-stream download
+    from being recorded in the archive.
+    """
+    if not isinstance(info, dict):
+        return ""
+    if info.get("_type") in ("playlist", "multi_video"):
+        for entry in info.get("entries") or []:
+            path = final_output_path(entry)
+            if path:
+                return path
+        return ""
+    path = str(info.get("filepath") or info.get("_filename") or "").strip()
+    if path:
+        return path
+    for download in reversed(info.get("requested_downloads") or []):
+        if isinstance(download, dict):
+            path = str(download.get("filepath") or "").strip()
+            if path:
+                return path
+    return ""
 
 
 # ==============================================================================
@@ -191,7 +217,9 @@ class VideoDownloader:
         rate_limit: Optional[float] = None,
     ):
         self.quality = quality
-        self.max_retries = max_retries
+        # A retry budget below one would skip every attempt and report an
+        # empty failure, so keep the loop meaningful for bad settings.
+        self.max_retries = max(1, int(max_retries))
         self.browser = normalize_browser(browser)
         self.write_subs = write_subs
         self.on_event = on_event
@@ -200,10 +228,137 @@ class VideoDownloader:
         self.container = container
         self.sub_langs = sub_langs
         self.rate_limit = rate_limit
+        self._format_downloaded: Dict[str, int] = {}
+        self._format_total: Dict[str, int] = {}
+        self._formats_finished: set = set()
+        self._expected_formats = 1
 
     def _notify(self, event: str, **kwargs):
         if self.on_event:
             self.on_event(event, kwargs)
+
+    # ---- multi-stream progress ------------------------------------------------
+    def _reset_format_progress(self) -> None:
+        self._format_downloaded = {}
+        self._format_total = {}
+        self._formats_finished = set()
+        self._expected_formats = 1
+
+    @staticmethod
+    def _format_key(data: Dict[str, Any]) -> str:
+        info = data.get("info_dict") or {}
+        return str(info.get("format_id") or data.get("filename") or "")
+
+    @staticmethod
+    def _requested_formats(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        info = data.get("info_dict") or {}
+        return [f for f in (info.get("requested_formats") or [])
+                if isinstance(f, dict)]
+
+    def _remember_expected_formats(self, data: Dict[str, Any]) -> None:
+        """Remember both requested streams and their approximate sizes.
+
+        A video is often delivered as separate video and audio streams.  The
+        first stream's ``finished`` hook must not be treated as the whole
+        download: the second stream still has to arrive, and ffmpeg has to
+        merge both files afterwards.
+        """
+        formats = self._requested_formats(data)
+        if not formats:
+            return
+        self._expected_formats = max(self._expected_formats, len(formats))
+        for fmt in formats:
+            key = str(fmt.get("format_id") or "")
+            if not key or key in self._format_total:
+                continue
+            size = fmt.get("filesize") or fmt.get("filesize_approx") or 0
+            if size:
+                self._format_total[key] = int(size)
+
+    def _aggregate_progress(
+        self, data: Dict[str, Any], downloaded: int, total: int
+    ) -> tuple[int, int, int, int]:
+        """Return (downloaded, total, streams_done, streams_expected) across formats."""
+        self._remember_expected_formats(data)
+        key = self._format_key(data)
+        if key:
+            self._format_downloaded[key] = max(0, int(downloaded))
+            if total:
+                self._format_total[key] = max(0, int(total))
+        done = len(self._formats_finished)
+        expected = max(1, self._expected_formats)
+        aggregate_downloaded = sum(self._format_downloaded.values())
+        aggregate_total = sum(self._format_total.values())
+        # Never report more than 100% while a stream is still missing.
+        if done < expected and aggregate_total > 0:
+            aggregate_total = max(aggregate_total, aggregate_downloaded + 1)
+        return (aggregate_downloaded, max(aggregate_total, aggregate_downloaded),
+                done, expected)
+
+    def _progress_hook(self, d: Dict[str, Any]):
+        """yt-dlp progress hook: forwards live telemetry and honours cancellation."""
+        if self.cancel_check and self.cancel_check():
+            raise yt_dlp.utils.DownloadCancelled("Download cancelled by user.")
+        # Subtitle downloads use the same hook but are not part of the
+        # video/audio stream count.
+        filename = str(d.get("filename") or "")
+        if os.path.splitext(filename)[1].lower() in {
+                ".srt", ".vtt", ".ass", ".ssa", ".lrc", ".json3"}:
+            return
+        status = d.get("status")
+        if status == "downloading":
+            downloaded = int(d.get("downloaded_bytes") or 0)
+            total = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
+            agg_done, agg_total, done, expected = self._aggregate_progress(
+                d, downloaded, total)
+            self._notify(
+                "progress",
+                filename=filename,
+                downloaded_bytes=agg_done,
+                total_bytes=agg_total,
+                speed=d.get("speed") or 0,
+                eta=d.get("eta") or 0,
+                status="downloading",
+                formats_done=done,
+                formats_total=expected,
+                current_format=str((d.get("info_dict") or {}).get("format_id") or ""),
+            )
+        elif status == "finished":
+            downloaded = int(d.get("downloaded_bytes") or 0)
+            total = int(d.get("total_bytes") or downloaded)
+            key = self._format_key(d)
+            if key:
+                self._format_downloaded[key] = max(downloaded, total)
+                self._formats_finished.add(key)
+            agg_done, agg_total, done, expected = self._aggregate_progress(
+                d, max(downloaded, total), total)
+            # Only announce "finished" once every requested stream is on
+            # disk.  Otherwise the GUI can show 100% after the video stream
+            # while the audio stream and ffmpeg merge are still pending.
+            all_streams_done = done >= expected
+            self._notify(
+                "progress",
+                filename=filename,
+                downloaded_bytes=agg_done,
+                total_bytes=agg_total,
+                speed=0,
+                eta=0,
+                status="finished" if all_streams_done else "stream_finished",
+                formats_done=done,
+                formats_total=expected,
+                current_format=str((d.get("info_dict") or {}).get("format_id") or ""),
+            )
+
+    def _postprocessor_hook(self, d: Dict[str, Any]):
+        """Report ffmpeg merging/post-processing without marking the job done."""
+        name = str(d.get("postprocessor") or "")
+        status = str(d.get("status") or "")
+        self._notify(
+            "postprocess",
+            postprocessor=name,
+            status=status,
+            filepath=str(d.get("filepath") or ""),
+        )
 
     def _wait_for_retry(self, seconds: float) -> bool:
         """Cancellation-aware backoff; returns True when cancellation was requested."""
@@ -213,32 +368,6 @@ class VideoDownloader:
                 return True
             time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
         return bool(self.cancel_check and self.cancel_check())
-
-    def _progress_hook(self, d: Dict[str, Any]):
-        """yt-dlp progress hook: forwards live telemetry and honours cancellation."""
-        if self.cancel_check and self.cancel_check():
-            raise yt_dlp.utils.DownloadCancelled("Download cancelled by user.")
-        if d.get("status") == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            self._notify(
-                "progress",
-                filename=d.get("filename", ""),
-                downloaded_bytes=d.get("downloaded_bytes") or 0,
-                total_bytes=total,
-                speed=d.get("speed") or 0,
-                eta=d.get("eta") or 0,
-                status="downloading",
-            )
-        elif d.get("status") == "finished":
-            self._notify(
-                "progress",
-                filename=d.get("filename", ""),
-                downloaded_bytes=d.get("downloaded_bytes") or 0,
-                total_bytes=d.get("total_bytes") or d.get("downloaded_bytes") or 0,
-                speed=0,
-                eta=0,
-                status="finished",
-            )
 
     def download_urls(
         self,
@@ -265,6 +394,15 @@ class VideoDownloader:
             "quiet": False,
             "no_warnings": False,
             "progress_hooks": [self._progress_hook],
+            "postprocessor_hooks": [self._postprocessor_hook],
+            # Low-bandwidth connections are the main source of failures.
+            # Let yt-dlp exhaust its own retries before the outer loop
+            # treats an attempt as failed.
+            "retries": 10,
+            "fragment_retries": 10,
+            "extractor_retries": 3,
+            "file_access_retries": 3,
+            "socket_timeout": 30,
         }
 
         if self.rate_limit is not None and self.rate_limit > 0:
@@ -314,7 +452,9 @@ class VideoDownloader:
 
             for attempt in range(1, self.max_retries + 1):
                 if self.cancel_check and self.cancel_check():
-                    break
+                    self._notify("cancelled", url=clean_url,
+                                 index=index, total=len(urls))
+                    return summary
                 self._notify(
                     "attempt",
                     url=clean_url,
@@ -326,8 +466,21 @@ class VideoDownloader:
                 )
 
                 try:
+                    self._reset_format_progress()
                     with yt_dlp.YoutubeDL(params=ydl_opts) as ydl:
-                        ydl.download([clean_url])
+                        # extract_info() returns only after yt-dlp has
+                        # downloaded every requested stream and run ffmpeg's
+                        # merge postprocessor.  Keep the info dict so the
+                        # final merged path can be verified below.
+                        info = ydl.extract_info(clean_url, download=True)
+
+                    final_path = final_output_path(info)
+                    if (not final_path or not os.path.isfile(final_path)
+                            or os.path.getsize(final_path) <= 0):
+                        raise RuntimeError(
+                            "yt-dlp finished without a complete merged output "
+                            f"file for {clean_url}"
+                            + (f" (expected {final_path})" if final_path else ""))
 
                     # yt-dlp normally writes the archive itself, but a
                     # post-processing failure can leave a finished file
@@ -342,19 +495,31 @@ class VideoDownloader:
                     return summary
                 except Exception as exc:
                     last_err = str(exc)
+                    if self.cancel_check and self.cancel_check():
+                        self._notify("cancelled", url=clean_url,
+                                     index=index, total=len(urls))
+                        return summary
+                    # An exception from one attempt is not a final failure:
+                    # yt-dlp may have already tried alternative clients and
+                    # the outer retry loop is still going.  Only emit
+                    # ``retry_error`` while another attempt will follow, and
+                    # wait for the whole budget before reporting ``failure``.
+                    if attempt >= self.max_retries:
+                        break
+                    backoff = min(30.0, 2.0 * attempt)
                     self._notify(
                         "retry_error",
                         url=clean_url,
                         attempt=attempt,
                         max_retries=self.max_retries,
                         error=last_err,
+                        will_retry=True,
+                        delay=backoff,
                     )
-                    if attempt < self.max_retries and not (self.cancel_check and self.cancel_check()):
-                        backoff = 2 * attempt
-                        if self._wait_for_retry(backoff):
-                            self._notify("cancelled", url=clean_url,
-                                         index=index, total=len(urls))
-                            return summary
+                    if self._wait_for_retry(backoff):
+                        self._notify("cancelled", url=clean_url,
+                                     index=index, total=len(urls))
+                        return summary
 
             if not success:
                 self._notify(

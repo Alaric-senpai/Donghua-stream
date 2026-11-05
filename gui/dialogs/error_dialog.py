@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 
 from ..components.primitives import btn, label_caps, mk_label
 from ..icons import icon
-from ..theme import T_ON_PRIMARY, T_ROSE2, app_stylesheet
+from ..theme import T_ON_PRIMARY, app_stylesheet
 
 
 class ErrorDialog(QDialog):
