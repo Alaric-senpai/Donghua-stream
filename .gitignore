@@ -17,6 +17,9 @@ build/
 .env
 *.log
 
+# Agent skills (local tooling)
+.agents/
+
 # Editor / OS
 .DS_Store
 .vscode/

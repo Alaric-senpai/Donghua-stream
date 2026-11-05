@@ -11,14 +11,28 @@ import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import RealDictCursor
 
-# Default Database Configuration
-DB_CONFIG = {
-    "host": os.environ.get("DB_HOST", "localhost"),
-    "port": int(os.environ.get("DB_PORT", "5432")),
-    "user": os.environ.get("DB_USER", "charles"),
-    "password": os.environ.get("DB_PASSWORD", "password"),
-    "dbname": os.environ.get("DB_NAME", "donghua_db"),
-}
+import app_config
+
+
+def get_db_config() -> Dict[str, Any]:
+    """Read PostgreSQL credentials from the central config on every call.
+
+    Reading lazily means a credential edit in Settings takes effect for the
+    very next connection without restarting the app.
+    """
+    return app_config.database_config()
+
+
+def reload_db_config() -> Dict[str, Any]:
+    """Refresh the legacy module-level snapshot used by display-only code."""
+    global DB_CONFIG
+    DB_CONFIG = get_db_config()
+    return DB_CONFIG
+
+
+# Compatibility snapshot for callers that display the connection info.  All
+# actual connections call get_db_config() so they never use a stale value.
+DB_CONFIG = get_db_config()
 
 
 def sanitize_slug(name: str) -> str:
@@ -36,16 +50,17 @@ def extract_video_id(url: str) -> str:
 
 def ensure_database_exists() -> bool:
     """Check if the target PostgreSQL database exists; if not, create it."""
-    target_db = DB_CONFIG["dbname"]
+    cfg = get_db_config()
+    target_db = cfg["dbname"]
     admin_conn = None
     try:
         # Connect to maintenance db 'postgres'
         admin_conn = psycopg2.connect(
             dbname="postgres",
-            user=DB_CONFIG["user"],
-            password=DB_CONFIG["password"],
-            host=DB_CONFIG["host"],
-            port=DB_CONFIG["port"],
+            user=cfg["user"],
+            password=cfg["password"],
+            host=cfg["host"],
+            port=cfg["port"],
         )
         admin_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         with admin_conn.cursor() as cur:
@@ -53,24 +68,28 @@ def ensure_database_exists() -> bool:
             exists = cur.fetchone() is not None
             if not exists:
                 # Safe execution to create database with owner
-                cur.execute(f'CREATE DATABASE "{target_db}" OWNER "{DB_CONFIG["user"]}"')
+                cur.execute(f'CREATE DATABASE "{target_db}" OWNER "{cfg["user"]}"')
                 return True
         return False
     except Exception as e:
-        raise RuntimeError(f"Failed to check or create database '{target_db}': {e}")
+        raise RuntimeError(
+            f"Failed to check or create database '{target_db}' "
+            f"on {cfg['host']}:{cfg['port']} as {cfg['user'] or '(no user)'}: {e}"
+        )
     finally:
         if admin_conn:
             admin_conn.close()
 
 
 def get_connection():
-    """Establish and return a connection to the donghua database."""
+    """Establish and return a connection using the current config values."""
+    cfg = get_db_config()
     return psycopg2.connect(
-        dbname=DB_CONFIG["dbname"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
+        dbname=cfg["dbname"],
+        user=cfg["user"],
+        password=cfg["password"],
+        host=cfg["host"],
+        port=cfg["port"],
     )
 
 
@@ -102,6 +121,12 @@ def init_schema():
                     UNIQUE(series_id, video_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_episodes_series_id ON episodes(series_id);
                 CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(status);
                 CREATE INDEX IF NOT EXISTS idx_series_key ON series(key);
@@ -111,7 +136,7 @@ def init_schema():
 
 def get_archive_downloaded_ids(save_dir: str) -> set:
     """Read video IDs already marked as downloaded in the directory's downloaded.txt."""
-    archive_path = os.path.join(save_dir, "downloaded.txt")
+    archive_path = os.path.join(os.path.expanduser(save_dir), "downloaded.txt")
     if not os.path.exists(archive_path):
         return set()
     ids = set()
@@ -126,8 +151,120 @@ def get_archive_downloaded_ids(save_dir: str) -> set:
     return ids
 
 
+# ==============================================================================
+# Download archive maintenance
+# ==============================================================================
+
+MEDIA_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov", ".m4v")
+
+
+def _valid_video_id(video_id: Any) -> bool:
+    value = str(video_id or "").strip()
+    return bool(value) and "://" not in value and " " not in value
+
+
+def _media_files(save_dir: str) -> List[str]:
+    try:
+        return [
+            f for f in os.listdir(save_dir)
+            if os.path.isfile(os.path.join(save_dir, f))
+            and f.lower().endswith(MEDIA_EXTENSIONS)
+            and not f.lower().endswith(".part")
+        ]
+    except OSError:
+        return []
+
+
+def _normalized_title(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _append_archive_ids(save_dir: str, ids: set) -> int:
+    """Write missing IDs into the directory archive. Returns how many were added."""
+    ids = {str(i).strip() for i in ids if _valid_video_id(i)}
+    if not ids:
+        return 0
+    existing = get_archive_downloaded_ids(save_dir)
+    missing = sorted(ids - existing)
+    if not missing:
+        return 0
+    archive_path = os.path.join(os.path.expanduser(save_dir), "downloaded.txt")
+    os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+    with open(archive_path, "a", encoding="utf-8") as f:
+        for vid in missing:
+            f.write(f"youtube {vid}\n")
+    return len(missing)
+
+
+def repair_archives() -> Dict[str, int]:
+    """Make every existing series folder carry a usable ``downloaded.txt``.
+
+    Existing media cannot always be mapped back to a URL because older
+    downloads did not store the YouTube ID in the filename.  This function is
+    deliberately conservative: it records episodes the database already marks
+    as downloaded, matches obvious titles/episode numbers, and handles the
+    unambiguous one-episode/one-file case.  Every folder also gets an archive
+    file so future downloads never start without one.
+    """
+    created = 0
+    added = 0
+    scanned = 0
+    for series in get_all_series():
+        save_dir = os.path.expanduser(str(series.get("save_dir") or ""))
+        if not save_dir or not os.path.isdir(save_dir):
+            continue
+        scanned += 1
+        archive_path = os.path.join(save_dir, "downloaded.txt")
+        existed = os.path.exists(archive_path)
+        ids = get_archive_downloaded_ids(save_dir) if existed else set()
+        found = set(ids)
+        episodes = get_episodes(int(series["id"]))
+        media = _media_files(save_dir)
+
+        for ep in episodes:
+            vid = ep.get("video_id")
+            if ep.get("status") == "downloaded" and _valid_video_id(vid):
+                found.add(str(vid))
+            if not _valid_video_id(vid):
+                continue
+            title = _normalized_title(ep.get("title"))
+            if title and len(title) >= 4:
+                if any(title in _normalized_title(name) for name in media):
+                    found.add(str(vid))
+            number = ep.get("episode_number")
+            if number and media:
+                pattern = rf"\bep(?:isode)?\s*0*{int(number)}\b"
+                if any(re.search(pattern, name, re.IGNORECASE) for name in media):
+                    found.add(str(vid))
+
+        # A single registered episode with a single media file is unambiguous.
+        if len(episodes) == 1 and len(media) == 1:
+            vid = episodes[0].get("video_id")
+            if _valid_video_id(vid):
+                found.add(str(vid))
+
+        # Do not guess when several episodes and several files exist: sorted
+        # filenames do not reliably correspond to catalog order, and marking
+        # the wrong episode downloaded would silently skip it forever.
+
+        if not existed:
+            os.makedirs(save_dir, exist_ok=True)
+            with open(archive_path, "a", encoding="utf-8"):
+                pass
+            created += 1
+        added += _append_archive_ids(save_dir, found)
+
+    return {"folders_scanned": scanned, "archives_created": created,
+            "ids_added": added}
+
+
 def sync_existing_records() -> Dict[str, int]:
     """Sync all series and episode URLs from urls.py into PostgreSQL.
+
+    Uses the static ``SERIES_CATALOG`` rather than
+    ``urls.get_all_series()``: the latter reads from this database, so
+    trusting it here would make the sync circular and prevent save-path
+    fixes in ``urls.py`` from ever reaching an existing row.
 
     Also synchronizes status against existing downloaded.txt files.
     """
@@ -138,7 +275,7 @@ def sync_existing_records() -> Dict[str, int]:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            for s in file_urls.get_all_series():
+            for s in file_urls.SERIES_CATALOG.values():
                 cur.execute(
                     """
                     INSERT INTO series (key, name, save_dir, description)
@@ -187,7 +324,13 @@ def init_db() -> Dict[str, Any]:
     """Initialize database: create db if missing, run migrations, and sync existing records."""
     db_created = ensure_database_exists()
     init_schema()
+    import_legacy_settings_from_db()
+    ensure_default_settings()
     sync_stats = sync_existing_records()
+    # Fill in archives left behind by older versions, then update every
+    # episode status from the repaired archives in one pass.
+    repair_archives()
+    sync_all_archives()
     return {
         "db_created": db_created,
         "synced_series": sync_stats["series"],
@@ -524,6 +667,30 @@ def sync_series_with_archive(series_id: int) -> int:
     return updated
 
 
+def sync_all_archives() -> int:
+    """Read every series archive once and apply all status changes together."""
+    total = 0
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for series in get_all_series():
+                ids = get_archive_downloaded_ids(series.get("save_dir", ""))
+                if not ids:
+                    continue
+                cur.execute(
+                    """
+                    UPDATE episodes
+                    SET status = 'downloaded',
+                        downloaded_at = COALESCE(downloaded_at, CURRENT_TIMESTAMP)
+                    WHERE series_id = %s AND video_id = ANY(%s)
+                      AND status != 'downloaded';
+                    """,
+                    (int(series["id"]), list(ids)),
+                )
+                total += cur.rowcount
+        conn.commit()
+    return total
+
+
 def delete_episode(episode_id: int) -> bool:
     """Delete an episode record from PostgreSQL."""
     with get_connection() as conn:
@@ -531,6 +698,93 @@ def delete_episode(episode_id: int) -> bool:
             cur.execute("DELETE FROM episodes WHERE id = %s", (episode_id,))
         conn.commit()
     return True
+
+
+def update_episode_fields(episode_id: int, title: Optional[str] = None,
+                          episode_number: Optional[int] = None,
+                          url: Optional[str] = None) -> bool:
+    """Edit an episode's title, number, and/or URL (CRUD support for the GUI/CLI)."""
+    updates, params = [], []
+    if title is not None:
+        updates.append("title = %s")
+        params.append(title.strip())
+    if episode_number is not None and episode_number > 0:
+        updates.append("episode_number = %s")
+        params.append(episode_number)
+    if url is not None and url.strip():
+        clean_url = url.strip()
+        updates.append("url = %s")
+        params.append(clean_url)
+        updates.append("video_id = %s")
+        params.append(extract_video_id(clean_url))
+    if not updates:
+        return False
+    params.append(episode_id)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE episodes SET {', '.join(updates)} WHERE id = %s", params)
+        conn.commit()
+    return True
+
+
+def get_series_poster_ids() -> Dict[int, str]:
+    """Return {series_id: first_episode_video_id} for library poster thumbnails."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT e.series_id, e.video_id FROM episodes e
+                WHERE e.id = (SELECT MIN(e2.id) FROM episodes e2
+                              WHERE e2.series_id = e.series_id);
+            """)
+            return {r[0]: r[1] for r in cur.fetchall()}
+
+
+# ==============================================================================
+# Settings Operations (config file is authoritative)
+# ==============================================================================
+
+DEFAULT_SETTINGS = app_config.DEFAULT_SETTINGS
+
+
+def import_legacy_settings_from_db() -> int:
+    """One-time import of the old PostgreSQL ``app_settings`` table.
+
+    The JSON config supersedes this table.  Keeping the import here (rather
+    than in app_config) avoids a circular dependency: app_config must be
+    importable before any database connection exists.
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value FROM app_settings;")
+                rows = dict(cur.fetchall())
+    except Exception:
+        # A missing/old table must never block app_config from working.
+        return 0
+    if not rows:
+        app_config.mark_legacy_imported()
+        return 0
+    return app_config.import_legacy_settings(rows)
+
+
+def ensure_default_settings() -> None:
+    """Create the config file on first run (settings are merged in memory)."""
+    app_config.ensure_config_file()
+
+
+def get_setting(key: str, default: Optional[str] = None) -> str:
+    """Retrieve an application setting from the central config."""
+    return app_config.get_setting(key, default)
+
+
+def set_setting(key: str, value: str) -> bool:
+    """Save an application setting to the central config."""
+    return app_config.set_setting(key, value)
+
+
+def get_all_settings() -> Dict[str, str]:
+    """Retrieve all application settings from the central config."""
+    return app_config.settings()
 
 
 def get_db_stats() -> Dict[str, int]:

@@ -22,7 +22,8 @@ from rich import box
 import questionary
 from questionary import Choice, Style
 
-# Database & Modularized components
+# Shared configuration & database components
+import app_config
 import db
 from db import (
     init_db,
@@ -103,6 +104,127 @@ SESSION_SETTINGS = {
 }
 
 DB_INITIALIZED = False
+CREDENTIALS_CHECKED = False
+
+
+def load_session_settings() -> None:
+    """Load persisted preferences from the shared JSON config."""
+    saved = app_config.settings()
+    SESSION_SETTINGS["quality"] = saved.get(
+        "default_quality", SESSION_SETTINGS["quality"])
+    browser = str(saved.get("browser_cookies", "")).strip().lower()
+    SESSION_SETTINGS["browser"] = (
+        None if browser in ("", "none", "no", "off", "disabled", "false")
+        else browser)
+    try:
+        SESSION_SETTINGS["max_retries"] = max(1, int(saved.get("max_retries", "3")))
+    except (TypeError, ValueError):
+        SESSION_SETTINGS["max_retries"] = 3
+
+
+def save_session_setting(key: str, value: Any) -> None:
+    """Persist a CLI preference so the GUI and future sessions share it."""
+    try:
+        app_config.set_setting(key, str(value))
+    except Exception as exc:
+        console.print(f"[yellow]⚠ Could not save {key.replace('_', ' ')}: {exc}[/yellow]")
+
+
+def ensure_configured_credentials() -> bool:
+    """Prompt for anything missing in ``~/.config/donghua-stream/config.json``.
+
+    Returns False only when database credentials are still unusable.  The
+    YouTube key is optional for the CLI (it powers the GUI Explore page), so a
+    blank answer just leaves that feature disabled.
+    """
+    global CREDENTIALS_CHECKED
+    if CREDENTIALS_CHECKED:
+        return app_config.database_ready()
+    CREDENTIALS_CHECKED = True
+
+    try:
+        issues = app_config.credential_issues()
+    except app_config.ConfigError as exc:
+        console.print(
+            "[bold red]Config file problem:[/bold red] "
+            f"{app_config.display_path()} could not be read.\n"
+            f"[dim]{exc}[/dim]\n"
+            "Fix the JSON, or remove the file to start from defaults.")
+        return False
+    if not issues:
+        return True
+
+    db_issues = [i for i in issues if i["section"] == "database"]
+    yt_issue = any(i["section"] == "youtube" for i in issues)
+    interactive = bool(sys.stdin.isatty())
+
+    if db_issues:
+        console.print(
+            f"\n[bold yellow]⚠ Missing credentials in[/bold yellow] "
+            f"[bold]{app_config.display_path()}[/bold]"
+        )
+        for issue in db_issues:
+            console.print(f"  [red]•[/red] {issue['label']}")
+
+    if not interactive:
+        if db_issues:
+            console.print(
+                "[bold red]Set the PostgreSQL values in the config file "
+                "before running non-interactive commands.[/bold red]\n"
+                f"[dim]{app_config.display_path()}[/dim]\n")
+            return False
+        if yt_issue:
+            console.print(
+                "[dim]YouTube Explore is disabled until an API key is saved "
+                f"in {app_config.display_path()}.[/dim]\n")
+        return True
+
+    if db_issues:
+        current = app_config.database_config()
+        console.print("[dim]Enter the PostgreSQL connection details (stored in the config file).[/dim]")
+        host = questionary.text(
+            "PostgreSQL host:", default=str(current.get("host") or "localhost"),
+            style=custom_style).ask()
+        port = questionary.text(
+            "PostgreSQL port:", default=str(current.get("port") or 5432),
+            validate=lambda v: True if v.isdigit() and 1 <= int(v) <= 65535
+            else "Enter a port between 1 and 65535",
+            style=custom_style).ask()
+        default_user = str(current.get("user") or os.environ.get("USER") or "")
+        user = questionary.text(
+            "PostgreSQL user:", default=default_user,
+            style=custom_style).ask()
+        password = questionary.password(
+            "PostgreSQL password (leave blank if not required):",
+            style=custom_style).ask()
+        dbname = questionary.text(
+            "Database name:", default=str(current.get("dbname") or "donghua_db"),
+            style=custom_style).ask()
+        if not host or not user or not dbname:
+            console.print("[bold red]Database credentials were not saved.[/bold red]")
+            return False
+        app_config.set_database({
+            "host": host.strip(), "port": int(port or 5432),
+            "user": user.strip(), "password": password or "",
+            "dbname": dbname.strip(),
+        })
+        db.reload_db_config()
+        console.print(f"[green]✔ Database credentials saved · {app_config.display_path()}[/green]")
+
+    if yt_issue:
+        console.print(
+            "[dim]A YouTube Data API v3 key is needed for the GUI Explore screen. "
+            "Create one in Google Cloud Console → APIs & Services → Credentials.[/dim]")
+        key = questionary.password(
+            "YouTube Data API key (leave blank to skip):",
+            style=custom_style).ask()
+        if key and key.strip():
+            app_config.set_youtube({"api_key": key.strip()})
+            console.print("[green]✔ YouTube API key saved.[/green]")
+        else:
+            console.print("[yellow]Skipped — Explore will prompt again.[/yellow]")
+
+    return app_config.database_ready()
 
 
 def ensure_db_ready(quiet: bool = False):
@@ -801,10 +923,12 @@ def interactive_resync_database():
 def interactive_settings():
     """Sub-menu to adjust session preferences."""
     while True:
+        key_state = "Configured" if app_config.youtube_ready() else "Missing"
         choices = [
             Choice(f"Default Quality: [{SESSION_SETTINGS['quality']}]", value="quality"),
             Choice(f"Browser Cookies: [{SESSION_SETTINGS['browser'] or 'Disabled'}]", value="browser"),
             Choice(f"Max Retries:     [{SESSION_SETTINGS['max_retries']}]", value="retries"),
+            Choice(f"YouTube API Key: [{key_state}]", value="youtube"),
             Choice("← Back to Main Menu", value="__back__"),
         ]
 
@@ -819,7 +943,8 @@ def interactive_settings():
 
         if action == "quality":
             SESSION_SETTINGS["quality"] = prompt_quality(SESSION_SETTINGS["quality"])
-            console.print(f"[green]Default quality set to {SESSION_SETTINGS['quality']}[/green]")
+            save_session_setting("default_quality", SESSION_SETTINGS["quality"])
+            console.print(f"[green]Default quality saved: {SESSION_SETTINGS['quality']}[/green]")
         elif action == "browser":
             b_choices = [
                 Choice("brave", value="brave"),
@@ -829,8 +954,12 @@ def interactive_settings():
                 Choice("None (Disabled)", value="none"),
             ]
             chosen_b = questionary.select("Select browser to read YouTube cookies from:", choices=b_choices).ask()
+            if chosen_b is None:
+                continue
             SESSION_SETTINGS["browser"] = None if chosen_b == "none" else chosen_b
-            console.print(f"[green]Browser cookie source set to: {SESSION_SETTINGS['browser']}[/green]")
+            save_session_setting("browser_cookies", chosen_b)
+            label = SESSION_SETTINGS["browser"] or "Disabled"
+            console.print(f"[green]Browser cookie source saved: {label}[/green]")
         elif action == "retries":
             new_r = questionary.text(
                 "Enter max retries (1-10):",
@@ -839,12 +968,26 @@ def interactive_settings():
             ).ask()
             if new_r:
                 SESSION_SETTINGS["max_retries"] = int(new_r)
-                console.print(f"[green]Max retries set to {SESSION_SETTINGS['max_retries']}[/green]")
+                save_session_setting("max_retries", new_r)
+                console.print(f"[green]Max retries saved: {SESSION_SETTINGS['max_retries']}[/green]")
+        elif action == "youtube":
+            current_key = app_config.get_youtube_api_key()
+            masked = "••••" + current_key[-4:] if current_key else "not set"
+            console.print(f"[dim]Current key: {masked} · {app_config.display_path()}[/dim]")
+            new_key = questionary.password(
+                "Paste a YouTube Data API v3 key (blank keeps the current value):",
+                style=custom_style).ask()
+            if new_key and new_key.strip():
+                app_config.set_youtube({"api_key": new_key.strip()})
+                console.print("[green]YouTube API key saved.[/green]")
+            elif new_key is not None:
+                console.print("[dim]Key unchanged.[/dim]")
 
 
 def main_interactive_menu():
     """Main application loop."""
     print_banner()
+    load_session_settings()
 
     while True:
         choices = [
@@ -914,8 +1057,9 @@ Examples:
         "-q",
         "--quality",
         type=str,
-        default="720p",
-        help="Target video quality (e.g. 1080p, 720p, 480p, 360p, best). Default: 720p",
+        default=None,
+        help="Target video quality (e.g. 1080p, 720p, 480p, 360p, best). "
+             "Default: the saved setting (720p on first run)",
     )
     parser.add_argument("-u", "--url", nargs="+", help="One or more YouTube URLs to download")
     parser.add_argument("-d", "--dir", type=str, help="Destination directory for custom URLs")
@@ -923,15 +1067,29 @@ Examples:
     parser.add_argument("-l", "--list", action="store_true", help="List all series, status, and exit")
     parser.add_argument("--register", type=str, help="Register a new Donghua series by name")
     parser.add_argument("--sync", action="store_true", help="Force sync PostgreSQL with urls.py and disk")
-    parser.add_argument("-b", "--browser", type=str, default=DEFAULT_BROWSER, help="Browser to read cookies from (e.g. brave, chrome)")
-    parser.add_argument("-r", "--retries", type=int, default=3, help="Max retry attempts per video (default: 3)")
+    parser.add_argument("-b", "--browser", type=str, default=None,
+                        help="Browser to read cookies from (brave, chrome, firefox, "
+                             "or none). Default: the saved setting")
+    parser.add_argument("-r", "--retries", type=int, default=None,
+                        help="Max retry attempts per video. Default: the saved setting")
     parser.add_argument("-i", "--interactive", action="store_true", help="Force interactive mode")
+    parser.add_argument("--gui", action="store_true", help="Launch the Donghua Stream PyQt6 desktop app")
 
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the `donghua` console command and `python script.py`."""
     args = parse_args()
+
+    # GUI mode shortcut (the desktop app runs its own credential dialog)
+    if args.gui:
+        import gui as gui_module
+        sys.exit(gui_module.main())
+
+    # The config file is the only credential source for both front-ends.
+    if not ensure_configured_credentials():
+        sys.exit(2)
 
     # Determine if CLI flags were provided or if we should run interactively
     has_cli_action = (
@@ -959,6 +1117,12 @@ if __name__ == "__main__":
     else:
         # Non-interactive CLI flags mode
         ensure_db_ready(quiet=True)
+        load_session_settings()
+        quality = args.quality or SESSION_SETTINGS["quality"]
+        browser = (args.browser if args.browser is not None
+                   else SESSION_SETTINGS["browser"])
+        retries = (args.retries if args.retries is not None
+                   else int(SESSION_SETTINGS["max_retries"]))
 
         if args.sync:
             interactive_resync_database()
@@ -982,9 +1146,9 @@ if __name__ == "__main__":
                 urls_list=args.url,
                 save_dir=save_dir,
                 series_name="Custom URLs",
-                quality=args.quality,
-                browser=args.browser,
-                max_retries=args.retries,
+                quality=quality,
+                browser=browser,
+                max_retries=retries,
             )
             sys.exit(0)
 
@@ -1011,10 +1175,10 @@ if __name__ == "__main__":
                 urls_list=target_urls,
                 save_dir=save_dir,
                 series_name=series_name,
-                quality=args.quality,
+                quality=quality,
                 series_id=series_id,
-                browser=args.browser,
-                max_retries=args.retries,
+                browser=browser,
+                max_retries=retries,
             )
             sys.exit(0)
 
@@ -1030,9 +1194,13 @@ if __name__ == "__main__":
                     urls_list=pending,
                     save_dir=s["save_dir"],
                     series_name=s["name"],
-                    quality=args.quality,
+                    quality=quality,
                     series_id=s["id"],
-                    browser=args.browser,
-                    max_retries=args.retries,
+                    browser=browser,
+                    max_retries=retries,
                 )
             sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

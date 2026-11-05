@@ -5,12 +5,99 @@ archive tracking, retries with backoff, and progress reporting.
 """
 
 import os
-import sys
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Dict, Any, Union
 import yt_dlp
 from urls import extract_video_id
+
+
+# ==============================================================================
+# Archive helpers
+# ==============================================================================
+
+_ARCHIVE_NAME = "downloaded.txt"
+_DISABLED_BROWSERS = {"", "none", "no", "off", "disabled", "false"}
+
+
+def normalize_browser(browser: Optional[str]) -> Optional[str]:
+    """Turn the UI's "No cookies" sentinel into ``None`` for yt-dlp.
+
+    Passing the literal string ``"none"`` to yt-dlp makes it raise
+    ``ERROR: unsupported browser: "none"``, so every entry point funnels
+    browser values through this helper.
+    """
+    value = str(browser or "").strip().lower()
+    return None if value in _DISABLED_BROWSERS else value
+
+
+def ensure_archive_file(save_dir: str) -> str:
+    """Create the per-directory download archive even before the first save."""
+    save_dir = os.path.expanduser(save_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    archive_path = os.path.join(save_dir, _ARCHIVE_NAME)
+    if not os.path.exists(archive_path):
+        with open(archive_path, "a", encoding="utf-8"):
+            pass
+    return archive_path
+
+
+def read_archive_ids(save_dir: str) -> set:
+    """Read the archive as a set of video IDs (last token on each line)."""
+    archive_path = os.path.join(os.path.expanduser(save_dir), _ARCHIVE_NAME)
+    ids = set()
+    if not os.path.exists(archive_path):
+        return ids
+    try:
+        with open(archive_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts:
+                    ids.add(parts[-1])
+    except OSError:
+        pass
+    return ids
+
+
+def add_archive_id(save_dir: str, video_id: str) -> bool:
+    """Append a YouTube ID to ``downloaded.txt`` if it is not recorded yet."""
+    video_id = (video_id or "").strip()
+    # extract_video_id() returns the raw URL when it cannot find an ID.
+    if not video_id or "://" in video_id or " " in video_id:
+        return False
+    archive_path = ensure_archive_file(save_dir)
+    if video_id in read_archive_ids(save_dir):
+        return False
+    with open(archive_path, "a", encoding="utf-8") as f:
+        f.write(f"youtube {video_id}\n")
+    return True
+
+
+def final_output_path(info: Any) -> str:
+    """Return the final (post-merge) filepath from a yt-dlp info dict.
+
+    ``download()`` discards the info dict, so the engine uses
+    ``extract_info(download=True)`` and checks this path before declaring a
+    video successful.  This prevents a partially merged multi-stream download
+    from being recorded in the archive.
+    """
+    if not isinstance(info, dict):
+        return ""
+    if info.get("_type") in ("playlist", "multi_video"):
+        for entry in info.get("entries") or []:
+            path = final_output_path(entry)
+            if path:
+                return path
+        return ""
+    path = str(info.get("filepath") or info.get("_filename") or "").strip()
+    if path:
+        return path
+    for download in reversed(info.get("requested_downloads") or []):
+        if isinstance(download, dict):
+            path = str(download.get("filepath") or "").strip()
+            if path:
+                return path
+    return ""
 
 
 # ==============================================================================
@@ -42,10 +129,7 @@ def resolve_format_string(quality: Union[str, int]) -> tuple[str, str]:
     """
     if isinstance(quality, int):
         height = quality
-        return (
-            f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
-            f"{height}p",
-        )
+        return _format_for_height(height), f"{height}p"
 
     q_str = str(quality).strip().lower()
     if q_str in ("best", "max", "highest", "auto", "none"):
@@ -54,16 +138,28 @@ def resolve_format_string(quality: Union[str, int]) -> tuple[str, str]:
     cleaned = q_str.rstrip("p")
     try:
         height = int(cleaned)
-        return (
-            f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
-            f"{height}p",
-        )
+        return _format_for_height(height), f"{height}p"
     except ValueError:
         # Default fallback to 720p
-        return (
-            "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "720p (fallback)",
-        )
+        return _format_for_height(720), "720p (fallback)"
+
+
+def _format_for_height(height: int) -> str:
+    """Prefer the exact height, then the best stream at or below it.
+
+    ``height<=720`` is deliberate: it caps the download at the selected
+    quality and picks the highest available stream below that cap.  If the
+    source has no 720p rendition, a lower one is used instead of failing.
+    The final ``/best`` only runs when no capped format exists at all.
+    """
+    h = max(1, int(height))
+    return (
+        f"bestvideo[height={h}]+bestaudio/"
+        f"bestvideo[height<={h}]+bestaudio/"
+        f"best[height={h}]/"
+        f"best[height<={h}]/"
+        "best"
+    )
 
 
 # ==============================================================================
@@ -96,18 +192,8 @@ class DownloadSummary:
 
 def already_downloaded(save_dir: str, url: str) -> bool:
     """Check if a URL was already recorded in the download archive for save_dir."""
-    archive_path = os.path.join(save_dir, "downloaded.txt")
-    if not os.path.exists(archive_path):
-        return False
     vid = extract_video_id(url)
-    try:
-        with open(archive_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if vid in line:
-                    return True
-    except Exception:
-        pass
-    return False
+    return bool(vid) and vid in read_archive_ids(save_dir)
 
 
 # ==============================================================================
@@ -124,16 +210,164 @@ class VideoDownloader:
         browser: Optional[str] = None,
         write_subs: bool = True,
         on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        ydl_logger: Any = None,
+        container: str = "mp4",
+        sub_langs: str = "en",
+        rate_limit: Optional[float] = None,
     ):
         self.quality = quality
-        self.max_retries = max_retries
-        self.browser = browser
+        # A retry budget below one would skip every attempt and report an
+        # empty failure, so keep the loop meaningful for bad settings.
+        self.max_retries = max(1, int(max_retries))
+        self.browser = normalize_browser(browser)
         self.write_subs = write_subs
         self.on_event = on_event
+        self.cancel_check = cancel_check
+        self.ydl_logger = ydl_logger
+        self.container = container
+        self.sub_langs = sub_langs
+        self.rate_limit = rate_limit
+        self._format_downloaded: Dict[str, int] = {}
+        self._format_total: Dict[str, int] = {}
+        self._formats_finished: set = set()
+        self._expected_formats = 1
 
     def _notify(self, event: str, **kwargs):
         if self.on_event:
             self.on_event(event, kwargs)
+
+    # ---- multi-stream progress ------------------------------------------------
+    def _reset_format_progress(self) -> None:
+        self._format_downloaded = {}
+        self._format_total = {}
+        self._formats_finished = set()
+        self._expected_formats = 1
+
+    @staticmethod
+    def _format_key(data: Dict[str, Any]) -> str:
+        info = data.get("info_dict") or {}
+        return str(info.get("format_id") or data.get("filename") or "")
+
+    @staticmethod
+    def _requested_formats(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        info = data.get("info_dict") or {}
+        return [f for f in (info.get("requested_formats") or [])
+                if isinstance(f, dict)]
+
+    def _remember_expected_formats(self, data: Dict[str, Any]) -> None:
+        """Remember both requested streams and their approximate sizes.
+
+        A video is often delivered as separate video and audio streams.  The
+        first stream's ``finished`` hook must not be treated as the whole
+        download: the second stream still has to arrive, and ffmpeg has to
+        merge both files afterwards.
+        """
+        formats = self._requested_formats(data)
+        if not formats:
+            return
+        self._expected_formats = max(self._expected_formats, len(formats))
+        for fmt in formats:
+            key = str(fmt.get("format_id") or "")
+            if not key or key in self._format_total:
+                continue
+            size = fmt.get("filesize") or fmt.get("filesize_approx") or 0
+            if size:
+                self._format_total[key] = int(size)
+
+    def _aggregate_progress(
+        self, data: Dict[str, Any], downloaded: int, total: int
+    ) -> tuple[int, int, int, int]:
+        """Return (downloaded, total, streams_done, streams_expected) across formats."""
+        self._remember_expected_formats(data)
+        key = self._format_key(data)
+        if key:
+            self._format_downloaded[key] = max(0, int(downloaded))
+            if total:
+                self._format_total[key] = max(0, int(total))
+        done = len(self._formats_finished)
+        expected = max(1, self._expected_formats)
+        aggregate_downloaded = sum(self._format_downloaded.values())
+        aggregate_total = sum(self._format_total.values())
+        # Never report more than 100% while a stream is still missing.
+        if done < expected and aggregate_total > 0:
+            aggregate_total = max(aggregate_total, aggregate_downloaded + 1)
+        return (aggregate_downloaded, max(aggregate_total, aggregate_downloaded),
+                done, expected)
+
+    def _progress_hook(self, d: Dict[str, Any]):
+        """yt-dlp progress hook: forwards live telemetry and honours cancellation."""
+        if self.cancel_check and self.cancel_check():
+            raise yt_dlp.utils.DownloadCancelled("Download cancelled by user.")
+        # Subtitle downloads use the same hook but are not part of the
+        # video/audio stream count.
+        filename = str(d.get("filename") or "")
+        if os.path.splitext(filename)[1].lower() in {
+                ".srt", ".vtt", ".ass", ".ssa", ".lrc", ".json3"}:
+            return
+        status = d.get("status")
+        if status == "downloading":
+            downloaded = int(d.get("downloaded_bytes") or 0)
+            total = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
+            agg_done, agg_total, done, expected = self._aggregate_progress(
+                d, downloaded, total)
+            self._notify(
+                "progress",
+                filename=filename,
+                downloaded_bytes=agg_done,
+                total_bytes=agg_total,
+                speed=d.get("speed") or 0,
+                eta=d.get("eta") or 0,
+                status="downloading",
+                formats_done=done,
+                formats_total=expected,
+                current_format=str((d.get("info_dict") or {}).get("format_id") or ""),
+            )
+        elif status == "finished":
+            downloaded = int(d.get("downloaded_bytes") or 0)
+            total = int(d.get("total_bytes") or downloaded)
+            key = self._format_key(d)
+            if key:
+                self._format_downloaded[key] = max(downloaded, total)
+                self._formats_finished.add(key)
+            agg_done, agg_total, done, expected = self._aggregate_progress(
+                d, max(downloaded, total), total)
+            # Only announce "finished" once every requested stream is on
+            # disk.  Otherwise the GUI can show 100% after the video stream
+            # while the audio stream and ffmpeg merge are still pending.
+            all_streams_done = done >= expected
+            self._notify(
+                "progress",
+                filename=filename,
+                downloaded_bytes=agg_done,
+                total_bytes=agg_total,
+                speed=0,
+                eta=0,
+                status="finished" if all_streams_done else "stream_finished",
+                formats_done=done,
+                formats_total=expected,
+                current_format=str((d.get("info_dict") or {}).get("format_id") or ""),
+            )
+
+    def _postprocessor_hook(self, d: Dict[str, Any]):
+        """Report ffmpeg merging/post-processing without marking the job done."""
+        name = str(d.get("postprocessor") or "")
+        status = str(d.get("status") or "")
+        self._notify(
+            "postprocess",
+            postprocessor=name,
+            status=status,
+            filepath=str(d.get("filepath") or ""),
+        )
+
+    def _wait_for_retry(self, seconds: float) -> bool:
+        """Cancellation-aware backoff; returns True when cancellation was requested."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self.cancel_check and self.cancel_check():
+                return True
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        return bool(self.cancel_check and self.cancel_check())
 
     def download_urls(
         self,
@@ -142,8 +376,9 @@ class VideoDownloader:
         quality: Optional[Union[str, int]] = None,
     ) -> DownloadSummary:
         """Download a list of video URLs into the target directory with configured quality."""
+        save_dir = os.path.expanduser(save_dir)
         os.makedirs(save_dir, exist_ok=True)
-        archive_file = os.path.join(save_dir, "downloaded.txt")
+        archive_file = ensure_archive_file(save_dir)
         chosen_quality = quality if quality is not None else self.quality
         format_str, quality_label = resolve_format_string(chosen_quality)
 
@@ -152,19 +387,37 @@ class VideoDownloader:
         ydl_opts: Dict[str, Any] = {
             "outtmpl": os.path.join(save_dir, "%(title)s.%(ext)s"),
             "format": format_str,
-            "merge_output_format": "mp4",
+            "merge_output_format": self.container if self.container in ("mp4", "mkv", "webm", "mov") else "mp4",
             "noplaylist": True,
             "download_archive": archive_file,
             "warn_when_outdated": False,
             "quiet": False,
             "no_warnings": False,
+            "progress_hooks": [self._progress_hook],
+            "postprocessor_hooks": [self._postprocessor_hook],
+            # Low-bandwidth connections are the main source of failures.
+            # Let yt-dlp exhaust its own retries before the outer loop
+            # treats an attempt as failed.
+            "retries": 10,
+            "fragment_retries": 10,
+            "extractor_retries": 3,
+            "file_access_retries": 3,
+            "socket_timeout": 30,
         }
 
+        if self.rate_limit is not None and self.rate_limit > 0:
+            ydl_opts["ratelimit"] = self.rate_limit * 1024 * 1024  # MB/s -> bytes/s
+
+        if self.ydl_logger is not None:
+            # Route yt-dlp console output to a custom logger (used by the GUI)
+            ydl_opts["logger"] = self.ydl_logger
+
         if self.write_subs:
+            langs = [l.strip() for l in (self.sub_langs or "en").split(",") if l.strip()] or ["en"]
             ydl_opts.update({
                 "writesubtitles": True,
                 "writeautomaticsub": True,
-                "subtitleslangs": ["en"],
+                "subtitleslangs": langs,
                 "subtitlesformat": "srt",
             })
 
@@ -180,6 +433,10 @@ class VideoDownloader:
         )
 
         for index, url in enumerate(urls, 1):
+            if self.cancel_check and self.cancel_check():
+                self._notify("cancelled")
+                break
+
             clean_url = url.strip()
             if not clean_url or clean_url.startswith("#"):
                 continue
@@ -194,6 +451,10 @@ class VideoDownloader:
             last_err = ""
 
             for attempt in range(1, self.max_retries + 1):
+                if self.cancel_check and self.cancel_check():
+                    self._notify("cancelled", url=clean_url,
+                                 index=index, total=len(urls))
+                    return summary
                 self._notify(
                     "attempt",
                     url=clean_url,
@@ -205,25 +466,60 @@ class VideoDownloader:
                 )
 
                 try:
+                    self._reset_format_progress()
                     with yt_dlp.YoutubeDL(params=ydl_opts) as ydl:
-                        ydl.download([clean_url])
+                        # extract_info() returns only after yt-dlp has
+                        # downloaded every requested stream and run ffmpeg's
+                        # merge postprocessor.  Keep the info dict so the
+                        # final merged path can be verified below.
+                        info = ydl.extract_info(clean_url, download=True)
 
+                    final_path = final_output_path(info)
+                    if (not final_path or not os.path.isfile(final_path)
+                            or os.path.getsize(final_path) <= 0):
+                        raise RuntimeError(
+                            "yt-dlp finished without a complete merged output "
+                            f"file for {clean_url}"
+                            + (f" (expected {final_path})" if final_path else ""))
+
+                    # yt-dlp normally writes the archive itself, but a
+                    # post-processing failure can leave a finished file
+                    # unrecorded.  Always reconcile after a successful run.
+                    add_archive_id(save_dir, extract_video_id(clean_url))
                     self._notify("success", url=clean_url, index=index, total=len(urls))
                     summary.succeeded.append(clean_url)
                     success = True
                     break
+                except yt_dlp.utils.DownloadCancelled:
+                    self._notify("cancelled", url=clean_url, index=index, total=len(urls))
+                    return summary
                 except Exception as exc:
                     last_err = str(exc)
+                    if self.cancel_check and self.cancel_check():
+                        self._notify("cancelled", url=clean_url,
+                                     index=index, total=len(urls))
+                        return summary
+                    # An exception from one attempt is not a final failure:
+                    # yt-dlp may have already tried alternative clients and
+                    # the outer retry loop is still going.  Only emit
+                    # ``retry_error`` while another attempt will follow, and
+                    # wait for the whole budget before reporting ``failure``.
+                    if attempt >= self.max_retries:
+                        break
+                    backoff = min(30.0, 2.0 * attempt)
                     self._notify(
                         "retry_error",
                         url=clean_url,
                         attempt=attempt,
                         max_retries=self.max_retries,
                         error=last_err,
+                        will_retry=True,
+                        delay=backoff,
                     )
-                    if attempt < self.max_retries:
-                        backoff = 2 * attempt
-                        time.sleep(backoff)
+                    if self._wait_for_retry(backoff):
+                        self._notify("cancelled", url=clean_url,
+                                     index=index, total=len(urls))
+                        return summary
 
             if not success:
                 self._notify(

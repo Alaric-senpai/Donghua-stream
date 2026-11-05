@@ -1,0 +1,32 @@
+"""Background disk-usage scanner for series folders."""
+import os
+from typing import List, Tuple
+
+from PyQt6.QtCore import QThread, pyqtSignal
+
+
+class SizeScanner(QThread):
+    scanned = pyqtSignal(int, object)   # series_id, bytes (Python int, no 32-bit overflow)
+
+    def __init__(self, jobs: List[Tuple[int, str]], parent=None):
+        super().__init__(parent)
+        self.jobs = jobs
+
+    def run(self):
+        for series_id, path in self.jobs:
+            if self.isInterruptionRequested():
+                return
+            total = 0
+            try:
+                for root, _dirs, files in os.walk(os.path.expanduser(path)):
+                    if self.isInterruptionRequested():
+                        return
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, f))
+                        except OSError:
+                            pass
+            except OSError:
+                total = 0
+            self.scanned.emit(series_id, total)
+
