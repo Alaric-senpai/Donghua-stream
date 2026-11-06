@@ -54,6 +54,10 @@ user-owned config file.
   yt-dlp console.
 - Quality presets from 360p to 1080p, or **Best Available**, with MP4/MKV/WebM
   merging and SRT subtitle downloads in configurable languages.
+- Multi-stream downloads (typically separate video and audio) are shown as
+  partial progress. An episode is marked complete only after yt-dlp has saved
+  every stream, its merge postprocessor has run, and the final merged file is
+  verified on disk with a nonzero size.
 - Per-video retry budget with backoff. yt-dlp also receives 10 transport and
   fragment retries plus a 30-second socket timeout, so a slow connection does
   not immediately fail an episode.

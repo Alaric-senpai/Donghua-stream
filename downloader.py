@@ -231,7 +231,6 @@ class VideoDownloader:
         self._format_downloaded: Dict[str, int] = {}
         self._format_total: Dict[str, int] = {}
         self._formats_finished: set = set()
-        self._expected_formats = 1
 
     def _notify(self, event: str, **kwargs):
         if self.on_event:
@@ -242,58 +241,47 @@ class VideoDownloader:
         self._format_downloaded = {}
         self._format_total = {}
         self._formats_finished = set()
-        self._expected_formats = 1
 
     @staticmethod
     def _format_key(data: Dict[str, Any]) -> str:
         info = data.get("info_dict") or {}
         return str(info.get("format_id") or data.get("filename") or "")
 
-    @staticmethod
-    def _requested_formats(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        info = data.get("info_dict") or {}
-        return [f for f in (info.get("requested_formats") or [])
-                if isinstance(f, dict)]
-
-    def _remember_expected_formats(self, data: Dict[str, Any]) -> None:
-        """Remember both requested streams and their approximate sizes.
-
-        A video is often delivered as separate video and audio streams.  The
-        first stream's ``finished`` hook must not be treated as the whole
-        download: the second stream still has to arrive, and ffmpeg has to
-        merge both files afterwards.
-        """
-        formats = self._requested_formats(data)
-        if not formats:
-            return
-        self._expected_formats = max(self._expected_formats, len(formats))
-        for fmt in formats:
-            key = str(fmt.get("format_id") or "")
-            if not key or key in self._format_total:
-                continue
-            size = fmt.get("filesize") or fmt.get("filesize_approx") or 0
-            if size:
-                self._format_total[key] = int(size)
-
     def _aggregate_progress(
         self, data: Dict[str, Any], downloaded: int, total: int
-    ) -> tuple[int, int, int, int]:
-        """Return (downloaded, total, streams_done, streams_expected) across formats."""
-        self._remember_expected_formats(data)
+    ) -> tuple[int, int, int]:
+        """Return (downloaded, total, streams_done) across all formats.
+
+        yt-dlp strips ``requested_formats`` from the per-stream hook, so the
+        engine cannot know the total stream count in advance.  It therefore
+        treats each stream as partial and only reports completion after the
+        whole ``extract_info`` call returns.
+        """
         key = self._format_key(data)
         if key:
             self._format_downloaded[key] = max(0, int(downloaded))
             if total:
                 self._format_total[key] = max(0, int(total))
         done = len(self._formats_finished)
-        expected = max(1, self._expected_formats)
         aggregate_downloaded = sum(self._format_downloaded.values())
         aggregate_total = sum(self._format_total.values())
-        # Never report more than 100% while a stream is still missing.
-        if done < expected and aggregate_total > 0:
-            aggregate_total = max(aggregate_total, aggregate_downloaded + 1)
         return (aggregate_downloaded, max(aggregate_total, aggregate_downloaded),
-                done, expected)
+                done)
+
+    def _emit_final_progress(self, filepath: str) -> None:
+        """Emit the one true ``finished`` event after the merge is verified."""
+        downloaded = sum(self._format_downloaded.values())
+        total = max(downloaded, sum(self._format_total.values()))
+        self._notify(
+            "progress",
+            filename=filepath,
+            downloaded_bytes=downloaded,
+            total_bytes=total,
+            speed=0,
+            eta=0,
+            status="finished",
+            formats_done=len(self._formats_finished),
+        )
 
     def _progress_hook(self, d: Dict[str, Any]):
         """yt-dlp progress hook: forwards live telemetry and honours cancellation."""
@@ -309,7 +297,7 @@ class VideoDownloader:
         if status == "downloading":
             downloaded = int(d.get("downloaded_bytes") or 0)
             total = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
-            agg_done, agg_total, done, expected = self._aggregate_progress(
+            agg_done, agg_total, done = self._aggregate_progress(
                 d, downloaded, total)
             self._notify(
                 "progress",
@@ -320,7 +308,6 @@ class VideoDownloader:
                 eta=d.get("eta") or 0,
                 status="downloading",
                 formats_done=done,
-                formats_total=expected,
                 current_format=str((d.get("info_dict") or {}).get("format_id") or ""),
             )
         elif status == "finished":
@@ -330,12 +317,12 @@ class VideoDownloader:
             if key:
                 self._format_downloaded[key] = max(downloaded, total)
                 self._formats_finished.add(key)
-            agg_done, agg_total, done, expected = self._aggregate_progress(
+            agg_done, agg_total, done = self._aggregate_progress(
                 d, max(downloaded, total), total)
-            # Only announce "finished" once every requested stream is on
-            # disk.  Otherwise the GUI can show 100% after the video stream
-            # while the audio stream and ffmpeg merge are still pending.
-            all_streams_done = done >= expected
+            # A per-stream ``finished`` is only partial progress: yt-dlp may
+            # still have to fetch another stream, and ffmpeg still has to
+            # merge them.  The engine emits the single final ``finished``
+            # after extract_info() returns and the merged file is verified.
             self._notify(
                 "progress",
                 filename=filename,
@@ -343,9 +330,8 @@ class VideoDownloader:
                 total_bytes=agg_total,
                 speed=0,
                 eta=0,
-                status="finished" if all_streams_done else "stream_finished",
+                status="stream_finished",
                 formats_done=done,
-                formats_total=expected,
                 current_format=str((d.get("info_dict") or {}).get("format_id") or ""),
             )
 
@@ -485,6 +471,7 @@ class VideoDownloader:
                     # yt-dlp normally writes the archive itself, but a
                     # post-processing failure can leave a finished file
                     # unrecorded.  Always reconcile after a successful run.
+                    self._emit_final_progress(final_path)
                     add_archive_id(save_dir, extract_video_id(clean_url))
                     self._notify("success", url=clean_url, index=index, total=len(urls))
                     summary.succeeded.append(clean_url)
