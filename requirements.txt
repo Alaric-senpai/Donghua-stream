@@ -1,4 +1,10 @@
-yt-dlp>=2024.8.1
-rich>=13.0.0
-questionary>=2.1.0
-psycopg2-binary>=2.9.0
+# Legacy compatibility file: canonical dependency metadata lives in
+# pyproject.toml.
+#
+# This installs the full editable development environment:
+#   python3 -m venv venv
+#   ./venv/bin/pip install -r requirements.txt
+#
+# Production installs use ./install.sh, which builds a wheel and installs it
+# into isolated runtimes outside the source tree.
+-e .[cli,gui,dev]

@@ -115,7 +115,7 @@ user-owned config file.
 - **PostgreSQL 12+**, running and reachable
 - A PostgreSQL role that can create the `donghua_db` database on first launch
 
-### Quick start
+### Quick start (production install)
 
 ```bash
 git clone https://github.com/Alaric-senpai/Donghua-stream.git
@@ -123,14 +123,25 @@ cd Donghua-stream
 ./install.sh
 ```
 
-The installer:
+`install.sh` builds a wheel from the checkout and installs it into **two
+isolated runtime environments** under
+`${XDG_DATA_HOME:-~/.local/share}/donghua-stream/`:
 
-1. creates or refreshes `./venv`,
-2. installs the project in editable mode,
-3. adds the `donghua`, `donghua-cli`, and `donghua-gui` entry points,
-4. symlinks them into `~/.local/bin`,
-5. writes the **Donghua Stream** application-menu entry,
-6. verifies imports and entry points.
+| Runtime | Contains | Launchers |
+| --- | --- | --- |
+| `cli` | shared downloader/config layer + `rich`/`questionary` | `donghua`, `donghua-cli` |
+| `app` | shared layer + PyQt6 (and the CLI extras) | `donghua-gui` |
+
+Only the launchers are linked into `~/.local/bin`. The checkout's `./venv` is
+not used by either runtime, so the installed commands keep working if the
+source tree is moved or deleted. Re-run `./install.sh` to upgrade.
+
+Install just one front-end if that is all you need:
+
+```bash
+./install.sh cli     # CLI only; no PyQt6 download
+./install.sh app     # desktop app only
+```
 
 Make sure `~/.local/bin` is on your `PATH`:
 
@@ -144,17 +155,10 @@ Then launch the desktop app:
 donghua-gui
 ```
 
-On first launch the app prompts for PostgreSQL credentials, creates the
-database and schema if needed, and offers to save a YouTube API key. Nothing
-secret is bundled with the source.
-
-### Manual install
-
-```bash
-python3 -m venv venv
-./venv/bin/pip install -e .
-./venv/bin/donghua-gui
-```
+`donghua --gui` from the CLI runtime delegates to the `donghua-gui` launcher
+when one is installed. On first launch the app prompts for PostgreSQL
+credentials, creates the database and schema if needed, and offers to save a
+YouTube API key. Nothing secret is bundled with the source.
 
 The app creates `donghua_db` automatically. If your PostgreSQL role cannot
 create databases, create it once as a superuser:
@@ -162,6 +166,21 @@ create databases, create it once as a superuser:
 ```sql
 CREATE DATABASE donghua_db OWNER your_role;
 ```
+
+### Manual install (wheel)
+
+```bash
+python3 -m venv /tmp/donghua-build
+/tmp/donghua-build/bin/pip install build
+/tmp/donghua-build/bin/python -m build --wheel
+
+python3 -m venv ~/.local/share/donghua-stream/cli
+~/.local/share/donghua-stream/cli/bin/pip install \
+  "dist/donghua_stream-1.0.1-py3-none-any.whl[cli]"
+~/.local/share/donghua-stream/cli/bin/donghua --help
+```
+
+Use `[cli]` for a CLI runtime and `[cli,gui]` for a desktop app runtime.
 
 ---
 
@@ -331,6 +350,7 @@ The GUI keeps PostgreSQL and network work off the UI thread through
 ├── explore_feed.py             # bundled Anime Box feed + RSS refresh
 ├── youtube_api.py              # YouTube Data API client
 ├── script.py                   # CLI entry point
+├── gui_entry.py                # donghua-gui launcher + CLI delegation
 ├── gui/
 │   ├── app.py                  # QApplication bootstrap
 │   ├── window.py               # MainWindow composition root
@@ -350,20 +370,40 @@ The GUI keeps PostgreSQL and network work off the UI thread through
 
 ## Development
 
+Development is deliberately separate from the production runtimes:
+
+```bash
+./install.sh dev
+```
+
+This creates or refreshes `./venv`, installs the project in editable mode with
+the `cli`, `gui`, and `dev` extras, and **does not touch** the global
+launchers. Run the source tree directly:
+
+```bash
+./venv/bin/donghua --help
+./venv/bin/donghua-gui
+QT_QPA_PLATFORM=offscreen ./venv/bin/python -m gui
+```
+
+Verification:
+
 ```bash
 ./venv/bin/python -m compileall -q .
-./venv/bin/python -m pyflakes app_config.py youtube_api.py downloader.py gui/ tests/
+./venv/bin/python -m pyflakes app_config.py youtube_api.py downloader.py \
+    explore_feed.py gui_entry.py gui/ tests/
 QT_QPA_PLATFORM=offscreen ./venv/bin/python -m unittest discover -s tests -v
 ```
 
-The test suite uses only the standard library and covers:
+The test suite uses the standard-library `unittest` runner and covers:
 
 - config normalization, permissions, and legacy import,
 - YouTube response parsing, error handling, and disk caching,
 - downloader retry semantics (no failure event until the budget is exhausted),
 - offscreen Explore behavior: zero API calls on load, bundled feed filters,
   explicit search, RSS refresh, and copyable search errors,
-- offscreen Download Center behavior.
+- offscreen Download Center behavior,
+- packaging metadata: flat modules, CLI/GUI extras, and bundled assets.
 
 Regenerate the README screenshots from the real app:
 
@@ -373,12 +413,6 @@ QT_QPA_PLATFORM=offscreen ./venv/bin/python tools/capture_screenshots.py
 
 The script needs the configured PostgreSQL catalog. It seeds the Download
 Center with an in-memory demo queue, so it never starts a real download.
-
-To run the GUI headlessly:
-
-```bash
-QT_QPA_PLATFORM=offscreen ./venv/bin/python -m gui
-```
 
 ---
 
@@ -415,6 +449,14 @@ Settings. Network failures are no longer treated as final while retries remain.
 
 Delete `~/.cache/donghua-stream/remote/` and reopen the page. Poster and
 thumbnail downloads are cached separately from the YouTube API cache.
+
+**`donghua-gui` still loads modules from the checkout**
+
+The installed command is still an old source/editable link. Re-run
+`./install.sh` (or `./install.sh app`). The installer removes `~/.local/bin`
+links that resolve into the checkout and relinks the isolated runtime. Check
+with `readlink -f ~/.local/bin/donghua-gui`; the target should be under
+`${XDG_DATA_HOME:-~/.local/share}/donghua-stream/`.
 
 ---
 
