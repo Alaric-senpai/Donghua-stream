@@ -18,11 +18,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtCore import QEventLoop, QTimer  # noqa: E402
+from PyQt6.QtCore import QEventLoop  # noqa: E402
 from PyQt6.QtGui import QFont  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-import db  # noqa: E402
 from gui.dialogs.wizard import AddWizard  # noqa: E402
 from gui.infrastructure.download_queue import DownloadTask  # noqa: E402
 from gui.theme import F_BODY, app_stylesheet  # noqa: E402
@@ -78,18 +77,13 @@ def capture_explore(app: QApplication, window: MainWindow) -> None:
     window.navigateTo("explore")
     view = window.explore_view
     view.ensure_loaded()
-    wait_until(app, lambda: not view._busy, timeout=40)
-    # A transient network/quota failure can leave only one rail; retry once so
-    # the documentation screenshot shows the complete discovery page.
-    if len(view._rails) < 2 or not view.notice.isHidden():
-        view.refresh(force=True)
-        wait_until(app, lambda: not view._busy, timeout=40)
+    wait_until(app, lambda: not view._busy, timeout=15)
     wait_until(app, lambda: sum(
         1 for c in view._cards
         if c.thumb._pix and not c.thumb._pix.isNull()) >= 8, timeout=25)
     pump(app, 1.0)
     save(window, "explore.png")
-    print(f"explore rails: {[len(r.get('items') or []) for r in view._rails]}")
+    print(f"explore cards: {len(view._cards)} (bundled feed, 0 API quota)")
 
 
 def capture_explore_search(app: QApplication, window: MainWindow) -> None:
@@ -98,9 +92,10 @@ def capture_explore_search(app: QApplication, window: MainWindow) -> None:
     wait_until(app, lambda: not view._busy and view._mode == "search", timeout=40)
     wait_until(app, lambda: sum(
         1 for c in view._cards
-        if c.thumb._pix and not c.thumb._pix.isNull()) >= 6, timeout=25)
+        if c.thumb._pix and not c.thumb._pix.isNull()) >= 12, timeout=25)
     pump(app, 1.0)
     save(window, "explore-search.png")
+    print(f"search cards: {len(view._cards)}")
 
 
 def capture_library(app: QApplication, window: MainWindow) -> None:
