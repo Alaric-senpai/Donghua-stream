@@ -16,7 +16,7 @@ from .primitives import hline
 
 NAV_PAGES = [
     ("home", "home", "Home", "Hero spotlight, spotlight rows and the poster catalog."),
-    ("explore", "compass", "Explore", "Discover donghua on YouTube with Data API v3."),
+    ("explore", "compass", "Explore", "The latest donghua from Anime Box on YouTube."),
     ("library", "library", "Library", "Every donghua in the database."),
     ("downloads", "download", "Downloads", "Network pipeline telemetry and queue control."),
     ("settings", "settings", "Settings", "Storage, quality, network and database preferences."),

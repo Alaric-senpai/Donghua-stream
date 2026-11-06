@@ -60,11 +60,8 @@ DEFAULT_SETTINGS: Dict[str, str] = {
 }
 
 DEFAULT_EXPLORE: Dict[str, Any] = {
-    # One curated search (100 quota units) plus a cheap trending list
-    # (1 unit) is the default discovery payload.
-    "curated_query": "donghua english sub",
-    "curated_order": "viewCount",
-    "trending_category": "1",
+    # Explore opens on a bundled Anime Box snapshot (zero API quota).  Only an
+    # explicit search spends quota, and its responses are cached on disk.
     "result_limit": 18,
     "cache_minutes": 20,
 }
@@ -208,9 +205,6 @@ def _explore(raw: Any) -> Dict[str, Any]:
     data = copy.deepcopy(DEFAULT_EXPLORE)
     if isinstance(raw, dict):
         data.update(raw)
-    data["curated_query"] = _text(data.get("curated_query"), DEFAULT_EXPLORE["curated_query"])
-    data["curated_order"] = _text(data.get("curated_order"), "viewCount")
-    data["trending_category"] = _text(data.get("trending_category"), "1")
     try:
         data["result_limit"] = max(1, min(50, int(data.get("result_limit") or 18)))
     except (TypeError, ValueError):

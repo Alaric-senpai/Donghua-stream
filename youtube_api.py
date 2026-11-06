@@ -1,13 +1,12 @@
-"""YouTube Data API v3 client used by the Explore screen.
+"""YouTube Data API v3 client.
 
-Only three public methods are needed for a quota-friendly discovery page:
-
-* ``trending``  - ``videos.list`` with ``chart=mostPopular`` (1 unit)
-* ``search``    - ``search.list`` (100 units) + one ``videos.list`` (1 unit)
-* ``video``     - details for a single id (1 unit)
+Explore uses ``search`` only, and only after an explicit user search: its
+default Anime Box feed is bundled with the app and costs zero quota.  The
+``trending``, ``video`` and ``discover`` helpers remain available for other
+callers and diagnostics.
 
 Responses are cached on disk under ``~/.cache/donghua-stream/youtube`` so
-re-opening Explore does not spend quota.  The module uses ``urllib`` from the
+repeating a search does not spend quota.  The module uses ``urllib`` from the
 standard library; no new runtime dependency is required.
 """
 from __future__ import annotations
@@ -447,11 +446,11 @@ class YouTubeClient:
 
 def discover(client: Optional[YouTubeClient] = None, *,
              refresh: bool = False) -> Dict[str, Any]:
-    """Load the two default Explore rails, keeping partial success.
+    """Legacy two-rail discovery helper retained for diagnostics.
 
-    A quota failure in the 100-unit search still leaves the cheap trending
-    rail usable; both failures raise the first error so the page can show a
-    copyable report.
+    The desktop Explore page no longer calls this; it opens the bundled Anime
+    Box feed instead.  A failure in the 100-unit search still leaves the cheap
+    trending rail usable, and total failure raises the first error.
     """
     client = client or YouTubeClient()
     cfg = app_config.explore_config()

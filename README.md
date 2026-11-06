@@ -39,12 +39,14 @@ user-owned config file.
 
 ### Discovery built in
 
-- **Explore** pulls a trending animation rail and a curated donghua rail from
-  the YouTube Data API v3.
-- Live YouTube search with one-click **Add** to an existing series or
-  **Add & Download** to a brand-new one.
-- Quota-friendly caching: discovery costs about 101 units, searches 101 units,
-  and both are cached on disk for 20 minutes by default.
+- **Explore** opens on a bundled snapshot of the
+  [Anime Box](https://www.youtube.com/@AnimeBox666) YouTube channel, laid out
+  as a YouTube-style video grid with durations, views, and membership badges.
+- Opening Explore costs **zero YouTube API quota**. **Refresh feed** reads the
+  channel's public RSS feed, which is also quota-free.
+- Explicit YouTube search with one-click **Add** to an existing series or
+  **Add & Download** to a brand-new one. A search uses `search.list` (100
+  units) plus one `videos.list` details call, then caches the result on disk.
 - Graceful, copyable error states for quota, network, and API-key problems.
 
 ### Download pipeline
@@ -82,7 +84,7 @@ user-owned config file.
 
 | Discovery | Search results |
 | --- | --- |
-| ![Explore page with trending and curated YouTube rails](docs/screenshots/explore.png) | ![YouTube search results for Battle Through the Heavens](docs/screenshots/explore-search.png) |
+| ![Explore page with the bundled Anime Box feed and a YouTube-style video grid](docs/screenshots/explore.png) | ![YouTube search results for Battle Through the Heavens](docs/screenshots/explore-search.png) |
 
 ### Library and series detail
 
@@ -170,7 +172,7 @@ CREATE DATABASE donghua_db OWNER your_role;
 | Page | What it does |
 | --- | --- |
 | **Home** | Hero spotlight, library filters, poster/list views, and quick actions |
-| **Explore** | Trending and curated YouTube rails, live search, add/download actions |
+| **Explore** | Zero-quota Anime Box feed, RSS refresh, explicit search, add/download actions |
 | **Library** | Every series with ready/pending counts and disk usage |
 | **Series Detail** | Episode registry, quality override, folder tools, per-episode retry |
 | **Add Donghua** | Three-step wizard: identity → storage → bulk episode paste |
@@ -243,9 +245,6 @@ source tree. The GUI and CLI both write through the same atomic-save layer.
     "per_series_subfolder": "1"
   },
   "explore": {
-    "curated_query": "donghua english sub",
-    "curated_order": "viewCount",
-    "trending_category": "1",
     "result_limit": 18,
     "cache_minutes": 20
   },
@@ -267,10 +266,19 @@ are never silently overwritten.
 3. Create an **API key** under *APIs & Services → Credentials*.
 4. Save it in **Settings → YouTube Data API** or in the CLI settings menu.
 
-Explore makes one `videos.list` trending call (1 unit) and one curated
-`search.list` call (100 units). Results are cached in
-`~/.cache/donghua-stream/youtube/` for `explore.cache_minutes` minutes. Use
-**Refresh** in Explore to bypass the cache.
+The API key is optional. Explore's default Anime Box feed is bundled with the
+app and **Refresh feed** uses YouTube's public RSS, so neither spends quota.
+Only an explicit search calls the Data API: `search.list` (100 units) and one
+`videos.list` details call. Responses are cached in
+`~/.cache/donghua-stream/youtube/` for `explore.cache_minutes` minutes, so
+repeating a search does not spend quota again. Use **Refresh feed** for new
+Anime Box uploads; it never uses the Data API.
+
+The bundled snapshot can be regenerated without an API key:
+
+```bash
+./venv/bin/python tools/update_animebox_feed.py
+```
 
 ### Cookies and bot checks
 
@@ -303,6 +311,7 @@ flowchart LR
 | `db.py` | PostgreSQL connection, automatic database/schema creation, catalog sync |
 | `downloader.py` | yt-dlp options, quality resolution, retries, subtitles, archive, events |
 | `urls.py` | Video-ID parsing, fallback series catalog, legacy compatibility |
+| `explore_feed.py` | Bundled Anime Box snapshot, filters, and quota-free RSS refresh |
 | `youtube_api.py` | YouTube Data API client with disk cache and friendly errors |
 | `script.py` | Rich interactive CLI and command-line entry point |
 | `gui/` | PyQt6 app: pages, components, dialogs, and infrastructure adapters |
@@ -319,12 +328,14 @@ The GUI keeps PostgreSQL and network work off the UI thread through
 ├── db.py                       # PostgreSQL catalog
 ├── downloader.py               # yt-dlp engine and retry policy
 ├── urls.py                     # URL parsing + fallback catalog
+├── explore_feed.py             # bundled Anime Box feed + RSS refresh
 ├── youtube_api.py              # YouTube Data API client
 ├── script.py                   # CLI entry point
 ├── gui/
 │   ├── app.py                  # QApplication bootstrap
 │   ├── window.py               # MainWindow composition root
 │   ├── theme.py                # design tokens + global stylesheet
+│   ├── assets/                 # bundled Anime Box feed snapshot
 │   ├── components/             # reusable UI primitives and cards
 │   ├── dialogs/                # wizard, credentials, URL import
 │   ├── infrastructure/         # queue, DB worker, thumbnails, size scan
@@ -350,7 +361,9 @@ The test suite uses only the standard library and covers:
 - config normalization, permissions, and legacy import,
 - YouTube response parsing, error handling, and disk caching,
 - downloader retry semantics (no failure event until the budget is exhausted),
-- offscreen Explore and Download Center UI behavior.
+- offscreen Explore behavior: zero API calls on load, bundled feed filters,
+  explicit search, RSS refresh, and copyable search errors,
+- offscreen Download Center behavior.
 
 Regenerate the README screenshots from the real app:
 
@@ -383,12 +396,14 @@ Set **Settings → Cookies source** to the browser where you are signed in to
 YouTube, or use `--browser`. This message is retried like any other transient
 failure; the app reports it only after the per-video retry budget is spent.
 
-**Explore shows “YouTube is not responding”**
+**Explore search shows “YouTube is not responding”**
 
-Check the API key, API enablement, network connection, and quota in Google
-Cloud. Partial discovery results are preserved when only one rail fails. If
-the cache is stale, press **Refresh**; cache files live in
-`~/.cache/donghua-stream/youtube/`.
+The Anime Box feed does not need an API key. Search does: check the key, API
+enablement, network connection, and quota in Google Cloud. If the cache is
+stale, run the search again; cache files live in
+`~/.cache/donghua-stream/youtube/`. To update the default feed without any
+API quota, press **Refresh feed** (public RSS) or rerun
+`tools/update_animebox_feed.py`.
 
 **Downloads are slow or stall on a weak connection**
 
