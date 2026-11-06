@@ -202,7 +202,12 @@ class DownloadManager(QObject):
                 "downloading", "stream_finished"):
             total = float(data.get("total_bytes") or 0)
             done = float(data.get("downloaded_bytes") or 0)
-            task.progress = (done / total) if total > 0 else 0.0
+            progress = (done / total) if total > 0 else 0.0
+            # A finished stream is not a finished episode: another stream
+            # and the ffmpeg merge may still be pending.
+            if data.get("status") == "stream_finished":
+                progress = min(progress, 0.99)
+            task.progress = progress
         elif task and ev == "progress" and data.get("status") == "finished":
             task.progress = 1.0
         self.download_event.emit(ev, data)

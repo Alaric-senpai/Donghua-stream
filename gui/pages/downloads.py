@@ -340,29 +340,35 @@ class DownloadsView(QWidget):
                 self.chip_speed.setText(f"Bandwidth: {speed_text(speed)}")
                 self.step_chip.setText("Downloading")
             else:
-                done_streams = data.get("formats_done", "?")
-                total_streams = data.get("formats_total", "?")
+                saved = data.get("formats_done")
                 self.tile_rate.set("—", "waiting for next stream")
                 self.tile_eta.set("--:--", "more data to fetch")
                 self.step_chip.setText(
-                    f"Stream {done_streams}/{total_streams} saved")
+                    f"Stream {saved} saved" if saved else "Stream saved")
             self.tile_peak.set(speed_text(self._peak_speed), "peak this run")
             self.tile_xfer.set(human_size(done), f"of {human_size(total)}")
-            self.np_bar.setValue(int(100 * done / total) if total else 0)
             if total:
+                pct = int(100 * done / total)
+                # A stream may be complete while another stream and the
+                # merge are still pending, so never show a full bar yet.
+                if status == "stream_finished":
+                    pct = min(pct, 99)
+                self.np_bar.setValue(pct)
                 self._last_done, self._last_total = done, total
+            else:
+                self.np_bar.setValue(0)
         elif ev == "progress" and data.get("status") == "finished":
             done = float(data.get("downloaded_bytes") or 0)
             total = float(data.get("total_bytes") or 0)
-            self.step_chip.setText("Finalizing")
-            self.tile_eta.set("--:--", "merging streams…")
+            self.step_chip.setText("Merged ✔")
+            self.tile_eta.set("00:00", "download complete")
             self.tile_xfer.set(human_size(done), f"of {human_size(total)}")
             self.np_bar.setValue(100)
         elif ev == "postprocess":
             if data.get("status") == "started":
                 name = str(data.get("postprocessor") or "Post-processing")
                 self.step_chip.setText(
-                    "Merging streams" if "Merger" in name else f"{name}…")
+                    "Merging streams" if "Merger" in name else "Finalizing")
                 self.tile_eta.set("--:--", "post-processing")
         elif ev == "attempt":
             self.step_chip.setText(f"Attempt {data.get('attempt')}/{data.get('max_retries')}")

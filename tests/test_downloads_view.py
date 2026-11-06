@@ -56,18 +56,21 @@ class DownloadsViewErrorTests(unittest.TestCase):
         self.view.on_event("progress", {
             "status": "stream_finished",
             "downloaded_bytes": 1000,
-            "total_bytes": 1200,
+            "total_bytes": 1000,
             "formats_done": 1,
-            "formats_total": 2,
             "speed": 0,
             "eta": 0,
         })
-        self.assertIn("Stream 1/2 saved", self.view.step_chip.text())
+        self.assertIn("Stream 1 saved", self.view.step_chip.text())
         self.assertLess(self.view.np_bar.value(), 100)
 
         self.view.on_event("postprocess", {
             "postprocessor": "Merger", "status": "started"})
         self.assertEqual(self.view.step_chip.text(), "Merging streams")
+
+        self.view.on_event("postprocess", {
+            "postprocessor": "MoveFiles", "status": "started"})
+        self.assertEqual(self.view.step_chip.text(), "Finalizing")
 
     def test_exhausted_video_waits_for_the_run_summary_to_show_the_banner(self):
         self._retry()

@@ -158,12 +158,8 @@ class VideoDownloaderRetryTests(unittest.TestCase):
     def test_first_stream_finished_is_not_reported_as_whole_download(self):
         def two_streams(ydl):
             hooks = ydl.params["progress_hooks"]
-            requested = [
-                {"format_id": "398", "filesize": 1000, "ext": "mp4"},
-                {"format_id": "251", "filesize": 200, "ext": "webm"},
-            ]
-            video = {"format_id": "398", "requested_formats": requested}
-            audio = {"format_id": "251", "requested_formats": requested}
+            video = {"format_id": "398", "ext": "mp4"}
+            audio = {"format_id": "251", "ext": "webm"}
             hooks[0]({
                 "status": "downloading", "downloaded_bytes": 500,
                 "total_bytes": 1000, "filename": "video.f398.mp4",
@@ -191,17 +187,35 @@ class VideoDownloaderRetryTests(unittest.TestCase):
 
         self.assertEqual([p["status"] for p in progress],
                          ["downloading", "stream_finished", "downloading",
-                          "finished"])
+                          "stream_finished", "finished"])
         first_done = progress[1]
         self.assertEqual(first_done["formats_done"], 1)
-        self.assertEqual(first_done["formats_total"], 2)
         self.assertEqual(first_done["downloaded_bytes"], 1000)
-        self.assertGreater(first_done["total_bytes"],
-                           first_done["downloaded_bytes"])
         self.assertEqual(progress[2]["downloaded_bytes"], 1100)
+        self.assertEqual(progress[3]["formats_done"], 2)
         self.assertEqual(progress[-1]["downloaded_bytes"], 1200)
         self.assertEqual(progress[-1]["total_bytes"], 1200)
+        self.assertEqual(os.path.basename(progress[-1]["filename"]),
+                         "merged.webm")
         self.assertEqual(summary.success_count, 1)
+
+    def test_progress_hook_never_emits_the_final_finished_event(self):
+        events = []
+
+        def on_event(name, data):
+            events.append((name, data))
+
+        engine = downloader.VideoDownloader(
+            max_retries=1, write_subs=False, on_event=on_event)
+        engine._reset_format_progress()
+        engine._progress_hook({
+            "status": "finished", "downloaded_bytes": 10, "total_bytes": 10,
+            "filename": "video.f137.mp4", "info_dict": {"format_id": "137"},
+        })
+
+        statuses = [data["status"] for name, data in events
+                    if name == "progress"]
+        self.assertEqual(statuses, ["stream_finished"])
 
     def test_subtitle_progress_is_ignored_for_stream_counting(self):
         events = []

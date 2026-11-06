@@ -521,10 +521,16 @@ class MainWindow(QMainWindow):
             self.header.set_active_text("1 Active", True)
             self.status_state.setText("Status: Downloading")
         elif ev == "progress" and data.get("status") == "stream_finished":
+            self.header.set_speed(0)
             self.status_state.setText("Status: Fetching next stream")
         elif ev == "postprocess" and data.get("status") == "started":
-            self.status_state.setText("Status: Merging streams")
+            self.header.set_speed(0)
+            name = str(data.get("postprocessor") or "")
+            self.status_state.setText(
+                "Status: Merging streams" if "Merger" in name
+                else "Status: Finalizing")
         elif ev == "success":
+            self.header.set_speed(0)
             self.status_state.setText("Status: Saved")
         elif ev == "finish":
             self.status_state.setText("Status: Idle")
