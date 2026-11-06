@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "donghua-stream"
-version = "1.0.0"
+version = "1.0.1"
 description = "Donghua / YouTube video downloader with a TV-streaming-style PyQt6 desktop app and rich interactive CLI, backed by PostgreSQL."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -15,12 +15,25 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "Topic :: Multimedia :: Video :: Capture",
 ]
+# Dependencies shared by both front-ends.  The front-end specific packages live
+# in the optional extras below so the CLI can be installed without PyQt6 and
+# the desktop app without the interactive prompt libraries.
 dependencies = [
     "yt-dlp>=2024.1.0",
     "psycopg2-binary>=2.9",
+]
+
+[project.optional-dependencies]
+cli = [
     "rich>=13.0",
     "questionary>=2.0",
+]
+gui = [
     "PyQt6>=6.6",
+]
+dev = [
+    "pyflakes>=3.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -28,16 +41,29 @@ dependencies = [
 
 [project.scripts]
 donghua = "script:main"
-donghua-gui = "gui:main"
+donghua-gui = "gui_entry:main"
 donghua-cli = "script:main"
 
 [tool.setuptools]
-# Flat module layout for the CLI/db/downloader (backward compatible) plus the
-# gui package: one module per page, reusable components, infrastructure adapters.
-py-modules = ["script", "db", "downloader", "urls", "app_config", "youtube_api"]
+# Flat module layout for the shared downloader/config/storage layer plus the
+# CLI and GUI entry points.  `explore_feed` and `gui_entry` must be listed
+# explicitly: editable installs only expose the modules declared here.
+py-modules = [
+    "script",
+    "db",
+    "downloader",
+    "urls",
+    "app_config",
+    "youtube_api",
+    "explore_feed",
+    "gui_entry",
+]
 
 [tool.setuptools.packages.find]
 include = ["gui", "gui.*"]
 
 [tool.setuptools.package-data]
-gui = ["assets/icons/*.svg"]
+gui = [
+    "assets/icons/*.svg",
+    "assets/animebox_feed.json",
+]

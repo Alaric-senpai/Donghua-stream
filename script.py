@@ -1082,10 +1082,12 @@ def main():
     """Entry point for the `donghua` console command and `python script.py`."""
     args = parse_args()
 
-    # GUI mode shortcut (the desktop app runs its own credential dialog)
+    # GUI mode shortcut (the desktop app runs its own credential dialog).
+    # `gui_entry` delegates to a separately installed `donghua-gui` runtime
+    # when this CLI environment does not include PyQt6.
     if args.gui:
-        import gui as gui_module
-        sys.exit(gui_module.main())
+        from gui_entry import main as gui_main
+        sys.exit(gui_main())
 
     # The config file is the only credential source for both front-ends.
     if not ensure_configured_credentials():
