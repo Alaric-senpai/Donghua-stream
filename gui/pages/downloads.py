@@ -1,10 +1,12 @@
 """Download Center: live telemetry, queue control and a colorized console."""
+import re
 from typing import Any, Dict, Optional
 
 from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QScrollArea, QTextEdit,
-    QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QScrollArea, QSplitter,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..components.empty_state import EmptyState
@@ -26,6 +28,7 @@ def terminal_html(line: str) -> str:
         "[ffmpeg]": "#f59e0b",
         "[archive]": "#4edea3",
         "[status]": "#94a3b8",
+        "[warning]": "#fbbf24",
         "[error]": "#f43f5e",
         "[info]": "#8494ab",
         "[Extractor]": "#a78bfa",
@@ -39,6 +42,24 @@ def terminal_html(line: str) -> str:
                 tag, f"<span style='color:{col};font-weight:700'>{tag}</span>", 1)
             break
     return f"<span style='color:#cbd5e1'>{safe}</span>"
+
+
+_PROGRESS_LINE = re.compile(
+    r"^\[download\]\s+(?:"
+    r"\d+(?:\.\d+)?%"                       # percentage, with or without total
+    r"|\d+(?:\.\d+)?\s*[KMGTP]?i?B\s+(?:at\b|\[)"  # unknown total + speed/time
+    r")"
+)
+
+
+def is_progress_line(line: str) -> bool:
+    """True for yt-dlp's mutable progress row, not destination/log rows."""
+    text = line.strip()
+    if not text.startswith("[download]"):
+        return False
+    if text.startswith(("[download] Destination:", "[download] has already")):
+        return False
+    return bool(_PROGRESS_LINE.match(text))
 
 
 class TileBox(QFrame):
@@ -75,6 +96,9 @@ class DownloadsView(QWidget):
     def __init__(self, manager: DownloadManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.manager = manager
+        self._console_expanded = False
+        self._progress_active = False
+        self._saved_splitter_sizes = [190, 420]
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 14, 28, 18)
@@ -105,9 +129,9 @@ class DownloadsView(QWidget):
         root.addLayout(head)
 
         # ---- now playing telemetry
-        npcard = QFrame()
-        npcard.setObjectName("card")
-        np = QHBoxLayout(npcard)
+        self.npcard = QFrame()
+        self.npcard.setObjectName("card")
+        np = QHBoxLayout(self.npcard)
         np.setContentsMargins(16, 12, 16, 12)
         np.setSpacing(12)
         left = QVBoxLayout()
@@ -136,10 +160,12 @@ class DownloadsView(QWidget):
         self.tile_eta = TileBox("ETA", "--:--", "time remaining")
         for t in (self.tile_rate, self.tile_peak, self.tile_xfer, self.tile_eta):
             np.addWidget(t)
-        root.addWidget(npcard)
+        root.addWidget(self.npcard)
 
         # ---- queue controls
-        qlab_row = QHBoxLayout()
+        self.qcontrols = QWidget()
+        qlab_row = QHBoxLayout(self.qcontrols)
+        qlab_row.setContentsMargins(0, 0, 0, 0)
         qlab_row.setSpacing(7)
         qlab_row.addWidget(label_caps("Queue priority · top runs first"))
         qlab_row.addStretch(1)
@@ -165,17 +191,17 @@ class DownloadsView(QWidget):
         clear.clicked.connect(self.manager.clear_finished)
         for b in (pause, resume, cancel_cur, clear):
             qlab_row.addWidget(b)
-        root.addLayout(qlab_row)
+        root.addWidget(self.qcontrols)
 
         self.queue_host = StackList(spacing=6)
         self.queue_empty = EmptyState(
             "⇩", "Queue is clear",
             "Queued downloads appear here when you start one from the Library.")
         self.queue_empty.setMinimumHeight(110)
-        qarea = QScrollArea()
-        qarea.setWidgetResizable(True)
-        qarea.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        qarea.setFixedHeight(182)
+        self.qarea = QScrollArea()
+        self.qarea.setWidgetResizable(True)
+        self.qarea.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.qarea.setMinimumHeight(110)
         qhost = QWidget()
         qhost.setObjectName("scrollHost")
         ql = QVBoxLayout(qhost)
@@ -184,8 +210,7 @@ class DownloadsView(QWidget):
         ql.addWidget(self.queue_host)
         ql.addWidget(self.queue_empty)
         ql.addStretch(1)
-        qarea.setWidget(qhost)
-        root.addWidget(qarea)
+        self.qarea.setWidget(qhost)
 
         # ---- copyable error banner (hidden until something fails)
         self.error_banner = QFrame()
@@ -232,12 +257,20 @@ class DownloadsView(QWidget):
         # ---- console
         term_card = QFrame()
         term_card.setObjectName("card")
+        term_card.setMinimumHeight(240)
         tl2 = QVBoxLayout(term_card)
         tl2.setContentsMargins(12, 10, 12, 12)
         tl2.setSpacing(8)
         term_head = QHBoxLayout()
         term_head.addWidget(label_caps("yt-dlp console"))
         term_head.addStretch(1)
+        self.expand_btn = btn(
+            "Expand", "ghost", "Expand the console to the full page", small=True)
+        self.expand_btn.setFixedHeight(24)
+        self.expand_btn.setIcon(icon("chevron-up", T_SEC, 12))
+        self.expand_btn.setIconSize(QSize(12, 12))
+        self.expand_btn.clicked.connect(self._toggle_console_expanded)
+        term_head.addWidget(self.expand_btn)
         self.copy_log_btn = btn(
             "Copy Console", "ghost", "Copy every line currently in the console",
             small=True)
@@ -252,9 +285,25 @@ class DownloadsView(QWidget):
         self.terminal = QTextEdit()
         self.terminal.setObjectName("console")
         self.terminal.setReadOnly(True)
+        self.terminal.setMinimumHeight(180)
+        self.terminal.setPlaceholderText("yt-dlp output will appear here…")
+        self.terminal.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.terminal.setToolTip(
+            "Select any line and press Ctrl+C, or use Copy Console.")
         self.terminal.document().setMaximumBlockCount(1200)
         tl2.addWidget(self.terminal, 1)
-        root.addWidget(term_card, 1)
+
+        self.console_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.console_splitter.setChildrenCollapsible(False)
+        self.console_splitter.setHandleWidth(8)
+        self.console_splitter.addWidget(self.qarea)
+        self.console_splitter.addWidget(term_card)
+        self.console_splitter.setStretchFactor(0, 0)
+        self.console_splitter.setStretchFactor(1, 1)
+        self.console_splitter.setSizes(self._saved_splitter_sizes)
+        root.addWidget(self.console_splitter, 1)
 
         self._peak_speed = 0.0
         self._last_done = 0
@@ -294,6 +343,30 @@ class DownloadsView(QWidget):
         QApplication.clipboard().setText(text)
         self._flash_button(self.copy_log_btn, "Copy Console")
 
+    def _toggle_console_expanded(self) -> None:
+        self._set_console_expanded(not self._console_expanded)
+
+    def _set_console_expanded(self, expanded: bool) -> None:
+        self._console_expanded = expanded
+        if expanded:
+            sizes = self.console_splitter.sizes()
+            if sizes and max(sizes) > 0:
+                self._saved_splitter_sizes = sizes
+            self.npcard.hide()
+            self.qcontrols.hide()
+            self.qarea.hide()
+            self.expand_btn.setText("Restore")
+            self.expand_btn.setToolTip("Restore the queue and telemetry panels")
+            self.expand_btn.setIcon(icon("chevron-down", T_SEC, 12))
+        else:
+            self.npcard.show()
+            self.qcontrols.show()
+            self.qarea.show()
+            self.console_splitter.setSizes(self._saved_splitter_sizes)
+            self.expand_btn.setText("Expand")
+            self.expand_btn.setToolTip("Expand the console to the full page")
+            self.expand_btn.setIcon(icon("chevron-up", T_SEC, 12))
+
     def on_state_changed(self) -> None:
         m = self.manager
         rows = []
@@ -327,6 +400,7 @@ class DownloadsView(QWidget):
         task_name = m.active_task.series_name if m.active_task else "Download"
         if ev == "start":
             self.error_banner.hide()
+            self._progress_active = False
         elif ev == "progress" and data.get("status") in ("downloading",
                                                          "stream_finished"):
             status = str(data.get("status"))
@@ -389,9 +463,9 @@ class DownloadsView(QWidget):
             first_line = error.splitlines()[0][:240] if error else "Unknown error"
             wait = f" in {int(delay)}s" if isinstance(delay, (int, float)) else ""
             self.step_chip.setText(f"Retrying {attempt}/{max_retries}")
-            self.terminal.append(terminal_html(
+            self.on_log_line(
                 f"[status] Attempt {attempt}/{max_retries} did not complete"
-                f"{wait} — retrying: {first_line}"))
+                f"{wait} — retrying: {first_line}")
         elif ev == "failure":
             # All retries for this video are exhausted.  Do not raise the
             # final error banner yet: the queue may still be downloading
@@ -400,15 +474,15 @@ class DownloadsView(QWidget):
             error = str(data.get("error") or "Unknown error").strip()
             first_line = error.splitlines()[0][:240] if error else "Unknown error"
             self.step_chip.setText("Episode failed — continuing")
-            self.terminal.append(terminal_html(
-                f"[error] Gave up on {url} after all retries: {first_line}"))
+            self.on_log_line(
+                f"[error] Gave up on {url} after all retries: {first_line}")
         elif ev == "success":
             self.step_chip.setText("Completed ✔")
         elif ev == "summary":
             if "fatal" in data:
                 fatal = str(data["fatal"])
                 self.tile_rate.set("ERR", fatal[:40])
-                self.terminal.append(terminal_html(f"[error] {fatal}"))
+                self.on_log_line(f"[error] {fatal}")
                 self._show_error(
                     "Download engine error",
                     f"{task_name} · the download engine stopped unexpectedly.",
@@ -429,4 +503,27 @@ class DownloadsView(QWidget):
                         details)
 
     def on_log_line(self, line: str) -> None:
-        self.terminal.append(terminal_html(line))
+        """Append log rows, but update yt-dlp progress rows in place."""
+        text = str(line).replace("\r\n", "\n").replace("\r", "\n")
+        for chunk in text.split("\n"):
+            chunk = chunk.rstrip()
+            if not chunk:
+                continue
+            progress = is_progress_line(chunk)
+            if progress and self._progress_active:
+                self._replace_last_block(terminal_html(chunk))
+            else:
+                self.terminal.append(terminal_html(chunk))
+            self._progress_active = progress
+        self.terminal.ensureCursorVisible()
+
+    def _replace_last_block(self, html: str) -> None:
+        block = self.terminal.document().lastBlock()
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.EndOfBlock,
+            QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.insertHtml(html)
+        self.terminal.setTextCursor(cursor)
