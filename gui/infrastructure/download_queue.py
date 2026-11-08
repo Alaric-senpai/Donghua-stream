@@ -1,4 +1,5 @@
 """Sequential yt-dlp queue bridged into Qt signals (one active task)."""
+import re
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -9,24 +10,36 @@ from downloader import VideoDownloader
 from ..utils import load_settings
 
 
+_EXISTING_TAG = re.compile(r"^\[[^\]]+\]")
+
+
 class QuietYdlLogger(QObject):
     """Routes yt-dlp console output into the Downloads terminal view."""
 
     line = pyqtSignal(str)
     tag = "[download]"
 
-    def debug(self, msg: Any):
-        text = str(msg).rstrip()
-        if text:
-            self.line.emit(f"{self.tag} {text}")
+    def _emit(self, msg: Any, fallback: str) -> None:
+        text = str(msg).strip()
+        if not text:
+            return
+        # yt-dlp already prefixes most rows with a tag such as [download] or
+        # [youtube]; keep those intact and only add a tag when one is missing.
+        if not _EXISTING_TAG.match(text):
+            text = f"{fallback} {text}"
+        self.line.emit(text)
 
-    warning = debug
-    info = debug
+    def debug(self, msg: Any):
+        self._emit(msg, self.tag)
+
+    def warning(self, msg: Any):
+        self._emit(msg, "[warning]")
+
+    def info(self, msg: Any):
+        self._emit(msg, "[info]")
 
     def error(self, msg: Any):
-        text = str(msg).rstrip()
-        if text:
-            self.line.emit(f"[error] {text}")
+        self._emit(msg, "[error]")
 
 
 class DownloadTask:

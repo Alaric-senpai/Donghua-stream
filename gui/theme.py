@@ -496,6 +496,16 @@ QTextEdit#console {{
     font-size: 11px;
     color: #cbd5e1;
     padding: 12px;
+    selection-background-color: {T_PRIMARY};
+    selection-color: {T_ON_PRIMARY};
+}}
+QSplitter::handle:vertical {{
+    background: transparent;
+    height: 8px;
+}}
+QSplitter::handle:vertical:hover {{
+    background: {T_LINE};
+    border-radius: 3px;
 }}
 QTextEdit#errorDetails {{
     background-color: {T_CANVAS_SOFT};
