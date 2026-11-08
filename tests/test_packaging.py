@@ -16,14 +16,13 @@ class PackagingTests(unittest.TestCase):
         modules = set(CONFIG["tool"]["setuptools"]["py-modules"])
         required = {
             "script", "db", "downloader", "urls", "app_config", "youtube_api",
-            "explore_feed", "gui_entry",
+            "gui_entry",
         }
         missing = required - modules
         self.assertFalse(missing, f"missing py-modules: {sorted(missing)}")
 
-    def test_bundled_explore_assets_are_package_data(self):
+    def test_bundled_icons_are_package_data(self):
         data = CONFIG["tool"]["setuptools"]["package-data"]["gui"]
-        self.assertIn("assets/animebox_feed.json", data)
         self.assertIn("assets/icons/*.svg", data)
 
     def test_frontend_dependencies_are_separate_extras(self):

@@ -75,15 +75,10 @@ def capture_home(app: QApplication, window: MainWindow) -> None:
 
 def capture_explore(app: QApplication, window: MainWindow) -> None:
     window.navigateTo("explore")
-    view = window.explore_view
-    view.ensure_loaded()
-    wait_until(app, lambda: not view._busy, timeout=15)
-    wait_until(app, lambda: sum(
-        1 for c in view._cards
-        if c.thumb._pix and not c.thumb._pix.isNull()) >= 8, timeout=25)
+    window.explore_view.ensure_loaded()
     pump(app, 1.0)
     save(window, "explore.png")
-    print(f"explore cards: {len(view._cards)} (bundled feed, 0 API quota)")
+    print("explore: idle search prompt")
 
 
 def capture_explore_search(app: QApplication, window: MainWindow) -> None:

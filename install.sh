@@ -103,6 +103,7 @@ build_wheel() {
     "$BUILD_VENV/bin/python" -m pip install --upgrade pip setuptools wheel -q
 
     echo "==> building wheel from source"
+    rm -rf "$PROJECT_DIR/build" "$PROJECT_DIR"/*.egg-info
     rm -f "$WHEELHOUSE"/donghua_stream-*.whl
     "$BUILD_VENV/bin/python" -m pip wheel \
         --no-deps --no-build-isolation \
@@ -159,20 +160,13 @@ def assert_installed(module):
 import app_config
 import db
 import downloader
-import explore_feed
 import urls
 import youtube_api
 
-for module in (app_config, db, downloader, explore_feed, urls, youtube_api):
+for module in (app_config, db, downloader, urls, youtube_api):
     assert_installed(module)
 
-bundle = pathlib.Path(explore_feed.BUNDLED_PATH).resolve()
-if not bundle.is_file():
-    raise SystemExit(f"bundled Explore feed missing: {bundle}")
-feed = explore_feed.load_bundled()
-if not feed.get("items"):
-    raise SystemExit("bundled Explore feed is empty")
-print(f"    bundled Explore feed: {len(feed['items'])} videos at {bundle}")
+print("    shared modules OK")
 
 if os.environ.get("VERIFY_GUI") == "1":
     import gui
@@ -230,15 +224,9 @@ install_dev() {
     (
         cd /tmp
         "$venv/bin/python" - <<'PY'
-import pathlib
-
-import explore_feed
 import gui
 import script
 
-bundle = pathlib.Path(explore_feed.BUNDLED_PATH)
-if not bundle.is_file():
-    raise SystemExit(f"bundled Explore feed missing: {bundle}")
 print("    editable imports OK")
 PY
         "$venv/bin/donghua" --help >/dev/null

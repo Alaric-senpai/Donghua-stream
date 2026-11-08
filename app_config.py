@@ -60,8 +60,8 @@ DEFAULT_SETTINGS: Dict[str, str] = {
 }
 
 DEFAULT_EXPLORE: Dict[str, Any] = {
-    # Explore opens on a bundled Anime Box snapshot (zero API quota).  Only an
-    # explicit search spends quota, and its responses are cached on disk.
+    # Explore never loads anything automatically.  Only an explicit search
+    # spends quota, and its responses are cached on disk.
     "result_limit": 18,
     "cache_minutes": 20,
 }
