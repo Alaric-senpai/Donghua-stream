@@ -1,9 +1,8 @@
 """YouTube Data API v3 client.
 
-Explore uses ``search`` only, and only after an explicit user search: its
-default Anime Box feed is bundled with the app and costs zero quota.  The
-``trending``, ``video`` and ``discover`` helpers remain available for other
-callers and diagnostics.
+Explore uses ``search`` only, and only after an explicit user search: nothing
+loads automatically.  The ``trending``, ``video`` and ``discover`` helpers
+remain available for other callers and diagnostics.
 
 Responses are cached on disk under ``~/.cache/donghua-stream/youtube`` so
 repeating a search does not spend quota.  The module uses ``urllib`` from the
@@ -448,8 +447,8 @@ def discover(client: Optional[YouTubeClient] = None, *,
              refresh: bool = False) -> Dict[str, Any]:
     """Legacy two-rail discovery helper retained for diagnostics.
 
-    The desktop Explore page no longer calls this; it opens the bundled Anime
-    Box feed instead.  A failure in the 100-unit search still leaves the cheap
+    The desktop Explore page no longer calls this; it only runs an explicit
+    user search.  A failure in the 100-unit search still leaves the cheap
     trending rail usable, and total failure raises the first error.
     """
     client = client or YouTubeClient()

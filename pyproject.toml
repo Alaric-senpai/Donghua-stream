@@ -46,8 +46,8 @@ donghua-cli = "script:main"
 
 [tool.setuptools]
 # Flat module layout for the shared downloader/config/storage layer plus the
-# CLI and GUI entry points.  `explore_feed` and `gui_entry` must be listed
-# explicitly: editable installs only expose the modules declared here.
+# CLI and GUI entry points.  `gui_entry` must be listed explicitly: editable
+# installs only expose the modules declared here.
 py-modules = [
     "script",
     "db",
@@ -55,7 +55,6 @@ py-modules = [
     "urls",
     "app_config",
     "youtube_api",
-    "explore_feed",
     "gui_entry",
 ]
 
@@ -65,5 +64,4 @@ include = ["gui", "gui.*"]
 [tool.setuptools.package-data]
 gui = [
     "assets/icons/*.svg",
-    "assets/animebox_feed.json",
 ]
