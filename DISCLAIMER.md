@@ -19,5 +19,3 @@ Donghua Stream is a **personal passion project**.
 - **User responsibility.** You are responsible for complying with the terms of
   service of any site you access and with the copyright laws that apply where
   you live. Only download content you have the right to access and keep.
-
-The repository is archived and is no longer maintained.
