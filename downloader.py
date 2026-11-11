@@ -416,6 +416,10 @@ class VideoDownloader:
             "extractor_retries": 3,
             "file_access_retries": 3,
             "socket_timeout": 30,
+            # Prevent Unicode characters in intermediate filenames that
+            # break ffmpeg's merge step (e.g. Chinese track names like
+            # "fhls-0_aac_q2-中文.mp4").
+            "restrict_filenames": True,
         }
 
         if self.rate_limit is not None and self.rate_limit > 0:
