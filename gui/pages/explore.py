@@ -9,11 +9,12 @@ from typing import Any, Dict, List, Optional
 from PyQt6.QtCore import QSize, Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
-    QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 import app_config
+import sources
 import youtube_api
 from ..components.primitives import btn, chip_tag, eyebrow, mk_label
 from ..components.video_card import VideoCard
@@ -53,6 +54,27 @@ QPushButton {
 QPushButton:hover { background: #3f3f3f; }
 QPushButton:pressed { background: #4a4a4a; }
 QPushButton:disabled { color: #717171; background: #1f1f1f; }
+"""
+
+SOURCE_STYLE = """
+QComboBox {
+    background: #0f0f0f;
+    border: 1px solid #303030;
+    border-radius: 20px;
+    padding: 0 14px;
+    color: #f1f1f1;
+    font-size: 12px;
+    font-weight: 600;
+}
+QComboBox:focus { border-color: #3ea6ff; }
+QComboBox:disabled { color: #717171; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background: #181818;
+    color: #f1f1f1;
+    selection-background-color: #3f3f3f;
+    border: 1px solid #303030;
+}
 """
 
 
@@ -159,6 +181,8 @@ class ExploreView(QWidget):
         self._mode = "idle"
         self._last_query = ""
         self._last_error = ""
+        self._source_key = "youtube"
+        self._source_label = "YouTube"
         self._cards: List[VideoCard] = []
         self._search_items: List[Dict[str, Any]] = []
 
@@ -199,6 +223,16 @@ class ExploreView(QWidget):
         # ---- search bar
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
+        self.source_combo = QComboBox()
+        for key, label in sources.SOURCE_CHOICES:
+            self.source_combo.addItem(label, key)
+        self.source_combo.setFixedHeight(40)
+        self.source_combo.setMinimumWidth(150)
+        self.source_combo.setStyleSheet(SOURCE_STYLE)
+        self.source_combo.setToolTip("Choose which site Explore searches")
+        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
+        search_row.addWidget(self.source_combo)
+
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(
             "Search YouTube for a donghua, studio, trailer or episode…")
@@ -362,6 +396,23 @@ class ExploreView(QWidget):
         worker.wait(500)
 
     # ---- search -----------------------------------------------------------
+    def _on_source_changed(self) -> None:
+        key = str(self.source_combo.currentData() or "youtube")
+        if key == self._source_key:
+            return
+        if self._busy:
+            return
+        self._source_key = key
+        self._source_label = self.source_combo.currentText() or "YouTube"
+        self._mode = "idle"
+        self._last_query = ""
+        self._last_error = ""
+        self._search_items = []
+        self._cards = []
+        self.search_input.clear()
+        self.grid.set_cards([])
+        self._show_idle_state()
+
     def _submit_search(self) -> None:
         query = self.search_input.text().strip()
         if not query:
@@ -369,20 +420,30 @@ class ExploreView(QWidget):
             return
         if self._busy:
             return
-        if not app_config.youtube_ready():
-            self._update_search_state()
-            self._last_query = query
-            self._show_error(
-                youtube_api.YouTubeNotConfigured(
-                    "No YouTube Data API key is saved."))
-            return
+        if self._source_key == "youtube":
+            if not app_config.youtube_ready():
+                self._update_search_state()
+                self._last_query = query
+                self._show_error(
+                    youtube_api.YouTubeNotConfigured(
+                        "No YouTube Data API key is saved."))
+                return
+            search = lambda: youtube_api.YouTubeClient().search(
+                query, max_results=int(
+                    app_config.explore_config().get("result_limit") or 18))
+        else:
+            source = sources.get_source(self._source_key)
+            if source is None:
+                self._show_error(RuntimeError(
+                    f"Unknown source: {self._source_key}"))
+                return
+            limit = int(app_config.explore_config().get("result_limit") or 18)
+            search = lambda: source.search(query, max_results=limit)
         self._mode = "search"
         self._last_query = query
         self._enter_search_mode(query, searching=True)
-        limit = int(app_config.explore_config().get("result_limit") or 18)
         self._run(
-            lambda: youtube_api.YouTubeClient().search(
-                query, max_results=limit),
+            search,
             lambda items: self._on_search(query, items),
             loading=True,
             failure=self._show_error,
@@ -400,22 +461,34 @@ class ExploreView(QWidget):
         self._show_idle_state()
 
     def _enter_search_mode(self, query: str, *, searching: bool) -> None:
+        label = self._source_label
         self.clear_btn.show()
-        self.eyebrow_label.setText("YOUTUBE · SEARCH")
-        self.subtitle_label.setText(
-            "Explicit YouTube search — results are cached locally to save "
-            "quota.")
+        self.eyebrow_label.setText(f"{label.upper()} · SEARCH")
+        if self._source_key == "youtube":
+            self.subtitle_label.setText(
+                "Explicit YouTube search — results are cached locally to save "
+                "quota.")
+            self.section_caption.setText(
+                "Contacting the YouTube Data API…" if searching else "")
+        else:
+            self.subtitle_label.setText(
+                f"Public {label} search — results are cached locally.")
+            self.section_caption.setText(
+                f"Contacting {label}…" if searching else "")
         self.section_title.setText(
             f"Searching for “{query}”" if searching else f"Results for “{query}”")
-        self.section_caption.setText(
-            "Contacting the YouTube Data API…" if searching else "")
         self._set_api_mode("search")
         if searching:
-            self.loading_title.setText("Searching YouTube")
-            self.loading_sub.setText(
-                "One explicit search uses 100 quota units. Results are "
-                "cached so repeating the same search does not spend quota "
-                "again.")
+            self.loading_title.setText(f"Searching {label}")
+            if self._source_key == "youtube":
+                self.loading_sub.setText(
+                    "One explicit search uses 100 quota units. Results are "
+                    "cached so repeating the same search does not spend quota "
+                    "again.")
+            else:
+                self.loading_sub.setText(
+                    "Fetching the public catalog. No account or API key is "
+                    "required.")
             self._show_loading(True)
         else:
             self._show_loading(False)
@@ -430,20 +503,37 @@ class ExploreView(QWidget):
         self._cards = self._make_cards(self._search_items)
         self.grid.set_cards(self._cards)
         self.grid.show()
+        is_series = self._source_key != "youtube"
+        label = self._source_label
         self.section_title.setText(f"Results for “{query}”")
         self.section_caption.setText(
-            f"{len(self._search_items)} videos · ordered by relevance")
-        self._set_status(
-            f"SEARCH · {len(self._search_items)} RESULTS · 100 API UNITS USED")
+            f"{len(self._search_items)} "
+            f"{'series' if is_series else 'videos'} · ordered by relevance")
+        if is_series:
+            self._set_status(
+                f"SEARCH · {len(self._search_items)} SERIES · {label.upper()}")
+        else:
+            self._set_status(
+                f"SEARCH · {len(self._search_items)} RESULTS · "
+                "100 API UNITS USED")
         if not self._search_items:
             self.grid.hide()
-            self._show_state(
-                "◎", "No videos found",
-                f"YouTube returned no video results for “{query}”. Try a "
-                "broader title or a studio name.",
-                "Clear search", "Open YouTube")
-            self._replace_state_actions(self._clear_search,
-                                        self._open_youtube_home)
+            if is_series:
+                self._show_state(
+                    "◎", "No series found",
+                    f"{label} returned no series for “{query}”. Try a "
+                    "shorter title or a different spelling.",
+                    "Clear search", f"Open {label}")
+                self._replace_state_actions(self._clear_search,
+                                            self._open_source_home)
+            else:
+                self._show_state(
+                    "◎", "No videos found",
+                    f"YouTube returned no video results for “{query}”. Try a "
+                    "broader title or a studio name.",
+                    "Clear search", "Open YouTube")
+                self._replace_state_actions(self._clear_search,
+                                            self._open_youtube_home)
         else:
             self._hide_notice()
 
@@ -469,6 +559,34 @@ class ExploreView(QWidget):
         self.grid.hide()
         self.loading_panel.hide()
         self.notice.hide()
+        self._update_search_state()
+        label = self._source_label
+        if self._source_key == "youtube":
+            self.search_input.setPlaceholderText(
+                "Search YouTube for a donghua, studio, trailer or episode…")
+        else:
+            self.search_input.setPlaceholderText(
+                f"Search {label} for a donghua series…")
+        self._set_api_mode("idle")
+        self.state_panel.show()
+        if self._source_key != "youtube":
+            self.eyebrow_label.setText(f"{label.upper()} · DONGHUA")
+            self.subtitle_label.setText(
+                f"Search {label} for a donghua series, then add its episodes "
+                "to your library.")
+            self.section_title.setText(f"Search {label}")
+            self.section_caption.setText(
+                "Nothing loads automatically — search when you are ready.")
+            self._set_status(f"{label.upper()} SEARCH · READY")
+            self._show_state(
+                "⌕", "Find a donghua series",
+                f"Search the public {label} catalog by title, then pick the "
+                "episodes you want in your library.",
+                f"Open {label}")
+            self._replace_state_actions(self._open_source_home,
+                                        self._open_source_home)
+            return
+
         self.eyebrow_label.setText("YOUTUBE · DONGHUA")
         self.subtitle_label.setText(
             "Search YouTube for a donghua, studio, trailer or episode, then "
@@ -476,9 +594,7 @@ class ExploreView(QWidget):
         self.section_title.setText("Search YouTube")
         self.section_caption.setText(
             "Nothing loads automatically — search when you are ready.")
-        self._set_api_mode("idle")
         ready = app_config.youtube_ready()
-        self.state_panel.show()
         if ready:
             self._set_status("YOUTUBE SEARCH · READY")
             self._show_state(
@@ -499,6 +615,15 @@ class ExploreView(QWidget):
                                         self._open_youtube_home)
 
     def _set_api_mode(self, mode: str) -> None:
+        if self._source_key != "youtube":
+            label = self._source_label.upper()
+            if mode == "search":
+                self._chip(f"{label} · SEARCHING", T_AMBER2, T_AMBER_SOFT,
+                           T_AMBER_LINE)
+            else:
+                self._chip(f"{label} · PUBLIC", T_EMERALD2, T_EMERALD_SOFT,
+                           T_EMERALD_LINE)
+            return
         if mode == "search":
             self._chip("100 API UNITS", T_AMBER2, T_AMBER_SOFT, T_AMBER_LINE)
         elif app_config.youtube_ready():
@@ -516,6 +641,19 @@ class ExploreView(QWidget):
             "font-weight: 700; padding: 2px 8px;")
 
     def _update_search_state(self) -> None:
+        if self._source_key != "youtube":
+            label = self._source_label
+            self.key_btn.hide()
+            self.search_btn.setToolTip(
+                f"Search {label} (public catalog, cached)")
+            self.search_hint.setText(
+                f"Searches the public {label} catalog and is cached for "
+                f"{app_config.explore_config().get('cache_minutes', 20)} min.")
+            self.search_hint.setStyleSheet(
+                f"color: {T_MUTED}; font-size: 10px;")
+            if self._mode == "idle":
+                self._set_api_mode("idle")
+            return
         ready = app_config.youtube_ready()
         self.key_btn.setVisible(not ready)
         if ready:
@@ -545,7 +683,7 @@ class ExploreView(QWidget):
         self._set_busy(True)
         if loading:
             self._show_loading(True)
-        self._set_status("CONTACTING YOUTUBE…")
+        self._set_status(f"CONTACTING {self._source_label.upper()}…")
 
         worker = ExploreWorker(token, fn, self)
         self._worker = worker
@@ -570,6 +708,7 @@ class ExploreView(QWidget):
         self.search_input.setEnabled(not busy)
         self.search_btn.setEnabled(not busy)
         self.clear_btn.setEnabled(not busy)
+        self.source_combo.setEnabled(not busy)
 
     # ---- states -----------------------------------------------------------
     def _show_loading(self, show: bool) -> None:
@@ -602,19 +741,28 @@ class ExploreView(QWidget):
             return
         self._mode = "search"
         self.clear_btn.show()
+        label = self._source_label
         if isinstance(exc, youtube_api.YouTubeError):
             summary = str(exc)
             self._last_error = exc.report()
+        elif self._source_key != "youtube" and hasattr(exc, "report"):
+            summary = str(exc) or f"{label} search failed."
+            self._last_error = exc.report()
         else:
-            summary = "Explore could not load YouTube results."
+            summary = (
+                f"Explore could not load {label} results."
+                if self._source_key != "youtube"
+                else "Explore could not load YouTube results.")
             self._last_error = traceback.format_exc()
         self.section_title.setText("Search failed")
         self.section_caption.setText(
             f"“{self._last_query}” · retry or clear the search")
         self._set_status("SEARCH ERROR · " + summary)
         self._show_state(
-            "⚠", "YouTube is not responding", summary,
-            "Retry search", "Clear search", tone="rose")
+            "⚠",
+            f"{label} is not responding" if self._source_key != "youtube"
+            else "YouTube is not responding",
+            summary, "Retry search", "Clear search", tone="rose")
         self._replace_state_actions(
             lambda: self.search_for(self._last_query), self._clear_search)
         self._show_notice(summary, self._last_error, tone="rose")
@@ -656,3 +804,11 @@ class ExploreView(QWidget):
 
     def _open_youtube_home(self) -> None:
         QDesktopServices.openUrl(QUrl("https://www.youtube.com"))
+
+    def _open_source_home(self) -> None:
+        if self._source_key == "youtube":
+            self._open_youtube_home()
+            return
+        source = sources.get_source(self._source_key)
+        if source is not None:
+            QDesktopServices.openUrl(QUrl(source.home_url))

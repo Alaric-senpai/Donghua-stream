@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 import db
+import sources
 from .components.header_bar import HeaderBar
 from .components.sidebar import Sidebar
 from .components.toast import Toast
@@ -18,6 +19,7 @@ from .dialogs.add_video import prompt_add_video
 from .dialogs.credentials import CredentialsDialog
 from .dialogs.quick_url import QuickUrlDialog
 from .dialogs.error_dialog import report_error
+from .dialogs.source_episodes import prompt_source_episodes
 from .dialogs.wizard import AddWizard
 from .infrastructure.db_worker import DbWorker
 from .infrastructure.download_queue import DownloadManager, DownloadTask
@@ -26,7 +28,7 @@ from .infrastructure.thumbnails import ThumbnailStore
 from .motion import fade_in
 from .pages.detail import SeriesDetailView
 from .pages.downloads import DownloadsView
-from .pages.explore import ExploreView
+from .pages.explore import ExploreView, ExploreWorker
 from .pages.home import HomeView
 from .pages.library import LibraryView
 from .pages.settings import SettingsView
@@ -48,6 +50,7 @@ class MainWindow(QMainWindow):
         self.thumbs.loaded.connect(self._on_thumb_loaded)
         self._token = 0
         self._workers: List[DbWorker] = []
+        self._series_workers: List[ExploreWorker] = []
         self._sizes: Dict[int, int] = {}
         self._scanner: Optional[SizeScanner] = None
         self._catalog_loaded = False
@@ -107,7 +110,7 @@ class MainWindow(QMainWindow):
             lambda video: self._add_explore_video(video, False))
         self.explore_view.download_requested.connect(
             lambda video: self._add_explore_video(video, True))
-        self.explore_view.open_requested.connect(self._open_youtube)
+        self.explore_view.open_requested.connect(self._open_explore_url)
         self.library_view.series_opened.connect(self.open_series)
         self.library_view.series_download_all.connect(self._download_all_for)
         self.library_view.series_folder.connect(self._open_folder_series)
@@ -388,7 +391,7 @@ class MainWindow(QMainWindow):
         self.run_db(lambda: db.add_episode(sid, url, title=title or ""), _saved)
 
     # ---- explore ----------------------------------------------------------------
-    def _open_youtube(self, video: Dict[str, Any]) -> None:
+    def _open_explore_url(self, video: Dict[str, Any]) -> None:
         url = str((video or {}).get("url") or "").strip()
         if url:
             QDesktopServices.openUrl(QUrl(url))
@@ -403,6 +406,10 @@ class MainWindow(QMainWindow):
         self.statusToast.show_message("YouTube API key saved to the config file.", True)
 
     def _add_explore_video(self, video: Dict[str, Any], download_now: bool) -> None:
+        if (str(video.get("kind") or "") == "series"
+                or sources.supports(str(video.get("url") or ""))):
+            self._add_explore_series(video, download_now)
+            return
         payload = prompt_add_video(
             video, self.home_view._all, download_now=download_now, parent=self)
         if not payload:
@@ -443,6 +450,96 @@ class MainWindow(QMainWindow):
                 self.statusToast.show_message(
                     f"Added to {series.get('name', 'the library')}.", True)
                 self.refresh_full(int(series["id"]))
+        self.run_db(_save, _saved)
+
+    def _add_explore_series(self, video: Dict[str, Any],
+                            download_now: bool) -> None:
+        url = str(video.get("url") or "").strip()
+        source_key = str(video.get("source") or sources.source_for_url(url) or "")
+        source = sources.get_source(source_key)
+        if not url or source is None:
+            self.statusToast.show_message(
+                "This result has no usable source URL.", False)
+            return
+        self.statusToast.show_message(
+            f"Loading episodes from {source.label}…", True)
+        worker = ExploreWorker(0, lambda: source.details(url), self)
+        self._series_workers.append(worker)
+
+        def _done(_token: int, result: Any) -> None:
+            if worker in self._series_workers:
+                self._series_workers.remove(worker)
+            worker.deleteLater()
+            if isinstance(result, Exception):
+                details = (result.report() if hasattr(result, "report")
+                           else f"{type(result).__name__}: {result}")
+                report_error(
+                    self, "Could not load series",
+                    f"{source.label} did not return the episode list. The "
+                    "site may be temporarily unavailable.",
+                    details)
+                return
+            self._prompt_source_series(result, download_now)
+
+        worker.result_ready.connect(_done)
+        worker.start()
+
+    def _prompt_source_series(self, details: Dict[str, Any],
+                              download_now: bool) -> None:
+        payload = prompt_source_episodes(
+            details, self.home_view._all, download_now=download_now,
+            parent=self)
+        if not payload:
+            return
+        episodes = list(payload.get("episodes") or [])
+        if not episodes:
+            self.statusToast.show_message("No episodes were selected.", False)
+            return
+
+        def _save() -> Any:
+            sid = payload.get("series_id")
+            if sid:
+                series_id = int(sid)
+            else:
+                source_label = str(
+                    details.get("channel") or details.get("source") or
+                    "Source")
+                description = (
+                    f"{source_label} series · "
+                    f"{details.get('url') or payload.get('source_url') or ''}"
+                ).strip()
+                created = db.create_series(
+                    payload.get("new_name") or details.get("title")
+                    or "New Donghua",
+                    description=description)
+                series_id = int(created["id"])
+            stats = db.add_episode_entries(series_id, episodes)
+            return db.get_series(series_id), stats
+
+        def _saved(res: Any) -> None:
+            if isinstance(res, Exception) or not res:
+                report_error(
+                    self, "Could not add series",
+                    "The source series could not be attached to the library.",
+                    f"{type(res).__name__}: {res}" if isinstance(res, Exception)
+                    else "The target series could not be loaded.")
+                return
+            series, stats = res
+            urls = [str(ep.get("url") or "").strip()
+                    for ep in episodes if ep.get("url")]
+            if payload.get("download_now"):
+                self._enqueue(series, urls)
+                return
+            added = int((stats or {}).get("added", 0) or 0)
+            updated = int((stats or {}).get("updated", 0) or 0)
+            message = f"Added {added} episode(s) to {series.get('name', 'the library')}."
+            if updated:
+                message = (
+                    f"Added {added} and refreshed {updated} episode(s) in "
+                    f"{series.get('name', 'the library')}.")
+            self.statusToast.show_message(message, True)
+            self.refresh_full(int(series["id"]))
+
         self.run_db(_save, _saved)
 
     # ---- wizard -----------------------------------------------------------------
@@ -520,6 +617,8 @@ class MainWindow(QMainWindow):
         elif ev == "attempt":
             self.header.set_active_text("1 Active", True)
             self.status_state.setText("Status: Downloading")
+        elif ev == "source":
+            self.status_state.setText("Status: Resolving source")
         elif ev == "progress" and data.get("status") == "stream_finished":
             self.header.set_speed(0)
             self.status_state.setText("Status: Fetching next stream")
@@ -689,6 +788,16 @@ class MainWindow(QMainWindow):
             self.explore_view.shutdown()
         except Exception:
             pass
+        for w in list(self._series_workers):
+            try:
+                if not w.isRunning():
+                    continue
+                w.requestInterruption()
+                if not w.wait(1500):
+                    w.terminate()
+                    w.wait(500)
+            except RuntimeError:
+                pass
         for w in list(self._workers):
             try:
                 if not w.isRunning():

@@ -5,11 +5,13 @@ archive tracking, retries with backoff, and progress reporting.
 """
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Dict, Any, Union
 import yt_dlp
-from urls import extract_video_id
+import sources
+from media_ids import archive_tag_for_id, extract_video_id
 
 
 # ==============================================================================
@@ -59,8 +61,9 @@ def read_archive_ids(save_dir: str) -> set:
     return ids
 
 
-def add_archive_id(save_dir: str, video_id: str) -> bool:
-    """Append a YouTube ID to ``downloaded.txt`` if it is not recorded yet."""
+def add_archive_id(save_dir: str, video_id: str,
+                   tag: Optional[str] = None) -> bool:
+    """Append a video ID to ``downloaded.txt`` if it is not recorded yet."""
     video_id = (video_id or "").strip()
     # extract_video_id() returns the raw URL when it cannot find an ID.
     if not video_id or "://" in video_id or " " in video_id:
@@ -68,9 +71,33 @@ def add_archive_id(save_dir: str, video_id: str) -> bool:
     archive_path = ensure_archive_file(save_dir)
     if video_id in read_archive_ids(save_dir):
         return False
+    tag = tag or archive_tag_for_id(video_id)
     with open(archive_path, "a", encoding="utf-8") as f:
-        f.write(f"youtube {video_id}\n")
+        f.write(f"{tag} {video_id}\n")
     return True
+
+
+_UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_title(title: str, limit: int = 150) -> str:
+    """Turn a page title into a single, portable filename component."""
+    text = _UNSAFE_FILENAME.sub("-", str(title or ""))
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    if len(text) > limit:
+        text = text[:limit].rstrip(" .")
+    return text
+
+
+def output_template(save_dir: str, title: str = "") -> str:
+    """Return a yt-dlp output template, optionally pinned to a page title."""
+    directory = os.path.expanduser(save_dir)
+    clean = safe_title(title)
+    if not clean:
+        return os.path.join(directory, "%(title)s.%(ext)s")
+    # A literal percent sign would otherwise start a yt-dlp format field.
+    clean = clean.replace("%", "%%")
+    return os.path.join(directory, f"{clean}.%(ext)s")
 
 
 def final_output_path(info: Any) -> str:
@@ -453,12 +480,33 @@ class VideoDownloader:
 
                 try:
                     self._reset_format_progress()
-                    with yt_dlp.YoutubeDL(params=ydl_opts) as ydl:
+                    attempt_opts = ydl_opts
+                    media_url = clean_url
+                    resolved = sources.resolve_for_download(clean_url)
+                    if resolved:
+                        media_url = resolved["url"]
+                        attempt_opts = dict(ydl_opts)
+                        # The archive must key off the stable source page URL,
+                        # never the transient CDN/extractor ID that the site
+                        # happens to embed today.
+                        attempt_opts.pop("download_archive", None)
+                        attempt_opts["outtmpl"] = output_template(
+                            save_dir, resolved.get("title") or "")
+                        self._notify(
+                            "source",
+                            url=clean_url,
+                            resolved_url=media_url,
+                            source=resolved.get("source") or "",
+                            title=resolved.get("title") or "",
+                            index=index,
+                            total=len(urls),
+                        )
+                    with yt_dlp.YoutubeDL(params=attempt_opts) as ydl:
                         # extract_info() returns only after yt-dlp has
                         # downloaded every requested stream and run ffmpeg's
                         # merge postprocessor.  Keep the info dict so the
                         # final merged path can be verified below.
-                        info = ydl.extract_info(clean_url, download=True)
+                        info = ydl.extract_info(media_url, download=True)
 
                     final_path = final_output_path(info)
                     if (not final_path or not os.path.isfile(final_path)

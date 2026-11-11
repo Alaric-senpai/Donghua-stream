@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "yt-dlp>=2024.1.0",
     "psycopg2-binary>=2.9",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +56,8 @@ py-modules = [
     "urls",
     "app_config",
     "youtube_api",
+    "media_ids",
+    "sources",
     "gui_entry",
 ]
 

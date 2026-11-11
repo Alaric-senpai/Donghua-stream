@@ -6,12 +6,13 @@ urls.py and local downloaded archives, and full CRUD operations.
 
 import os
 import re
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import RealDictCursor
 
 import app_config
+from media_ids import archive_tag_for_id, extract_video_id
 
 
 def get_db_config() -> Dict[str, Any]:
@@ -40,12 +41,6 @@ def sanitize_slug(name: str) -> str:
     s = name.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return s.strip("_") or "series"
-
-
-def extract_video_id(url: str) -> str:
-    """Extract YouTube 11-char video ID from various URL formats."""
-    m = re.search(r"(?:v=|youtu\.be\/|\/embed\/|\/v\/)([0-9A-Za-z_-]{11})", url)
-    return m.group(1) if m else url.strip()
 
 
 def ensure_database_exists() -> bool:
@@ -192,7 +187,7 @@ def _append_archive_ids(save_dir: str, ids: set) -> int:
     os.makedirs(os.path.dirname(archive_path), exist_ok=True)
     with open(archive_path, "a", encoding="utf-8") as f:
         for vid in missing:
-            f.write(f"youtube {vid}\n")
+            f.write(f"{archive_tag_for_id(vid)} {vid}\n")
     return len(missing)
 
 
@@ -587,6 +582,74 @@ def add_episodes_bulk(series_id: int, urls: List[str]) -> Dict[str, int]:
         conn.commit()
 
     return {"added": added, "skipped": skipped, "total": added + skipped}
+
+
+def add_episode_entries(series_id: int,
+                        entries: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Insert episode rows carrying title and episode-number metadata.
+
+    Explore sends the whole episode list of a source series at once, so this
+    keeps one connection and one transaction.  Existing rows keep their
+    downloaded status while blank titles/numbers are filled in; the canonical
+    URL is refreshed because source sites occasionally restructure slugs.
+    """
+    series = get_series(series_id)
+    if not series:
+        raise ValueError(f"Series ID {series_id} not found.")
+
+    arch_ids = get_archive_downloaded_ids(series["save_dir"])
+    added = updated = skipped = 0
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for entry in entries or []:
+                if not isinstance(entry, dict):
+                    skipped += 1
+                    continue
+                clean_url = str(entry.get("url") or "").strip()
+                if not clean_url or clean_url.startswith("#"):
+                    skipped += 1
+                    continue
+                vid = extract_video_id(clean_url)
+                if not vid:
+                    skipped += 1
+                    continue
+                title = str(entry.get("title") or "").strip()
+                number = entry.get("episode_number")
+                try:
+                    number = int(number) if number is not None else None
+                except (TypeError, ValueError):
+                    number = None
+                status = "downloaded" if vid in arch_ids else "pending"
+
+                cur.execute(
+                    """
+                    INSERT INTO episodes
+                        (series_id, video_id, url, title, episode_number, status)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (series_id, video_id) DO UPDATE
+                    SET url = EXCLUDED.url,
+                        title = COALESCE(NULLIF(EXCLUDED.title, ''),
+                                         episodes.title),
+                        episode_number = COALESCE(EXCLUDED.episode_number,
+                                                  episodes.episode_number),
+                        status = CASE
+                            WHEN EXCLUDED.status = 'downloaded' THEN 'downloaded'
+                            ELSE episodes.status
+                        END
+                    RETURNING (xmax = 0) AS inserted;
+                    """,
+                    (series_id, vid, clean_url, title, number, status),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    added += 1
+                else:
+                    updated += 1
+        conn.commit()
+
+    return {"added": added, "updated": updated,
+            "total": added + updated + skipped}
 
 
 def get_episodes(series_id: int, status: Optional[str] = None) -> List[Dict[str, Any]]:

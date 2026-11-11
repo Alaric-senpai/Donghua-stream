@@ -5,9 +5,13 @@ import unittest
 from unittest import mock
 
 import downloader
+import media_ids
 
 VIDEO_ID = "abc12345678"
 VIDEO_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
+SOURCE_URL = ("https://animecube.live/anime/battle-through-the-heavens"
+              "?season=tab-1&episode=btth-tab-1-ep-218")
+DIRECT_URL = "https://www.dailymotion.com/video/k69vTxDr2f4A22MukEq"
 
 
 class FakeYoutubeDL:
@@ -231,6 +235,80 @@ class VideoDownloaderRetryTests(unittest.TestCase):
             "info_dict": {"format_id": "srt"},
         })
         self.assertEqual(events, [])
+
+
+class SourceDownloadTests(unittest.TestCase):
+    """Source page URLs are resolved first, then archived by their stable ID."""
+
+    def setUp(self):
+        FakeYoutubeDL.outcomes = [None]
+        FakeYoutubeDL.calls = []
+        FakeYoutubeDL.last_params = {}
+        self.resolved = {
+            "url": DIRECT_URL,
+            "title": "Battle Through the Heavens - Season 5 Episode 218",
+            "source": "animecube",
+            "video_id": media_ids.extract_video_id(SOURCE_URL),
+            "quality": "4K",
+            "platform": "dailymotion",
+        }
+
+    def _run(self, save_dir, urls):
+        events = []
+
+        def on_event(name, data):
+            events.append((name, data))
+
+        with mock.patch.object(downloader.yt_dlp, "YoutubeDL", FakeYoutubeDL), \
+                mock.patch.object(
+                    downloader.sources, "resolve_for_download",
+                    side_effect=lambda url: (
+                        self.resolved if url == SOURCE_URL else None)):
+            engine = downloader.VideoDownloader(
+                max_retries=1, write_subs=False, on_event=on_event)
+            summary = engine.download_urls(urls, save_dir)
+        return events, summary
+
+    def test_source_page_is_resolved_and_archived_by_page_id(self):
+        with tempfile.TemporaryDirectory() as save_dir:
+            events, summary = self._run(save_dir, [SOURCE_URL])
+
+            self.assertEqual(FakeYoutubeDL.calls[0][0], DIRECT_URL)
+            self.assertNotIn("download_archive", FakeYoutubeDL.last_params)
+            self.assertIn("Battle Through the Heavens - Season 5 Episode 218",
+                          FakeYoutubeDL.last_params["outtmpl"])
+            self.assertEqual(summary.success_count, 1)
+            self.assertEqual(len(
+                [data for name, data in events if name == "source"]), 1)
+
+            vid = media_ids.extract_video_id(SOURCE_URL)
+            with open(os.path.join(save_dir, "downloaded.txt"),
+                      encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+            self.assertEqual(lines, [f"animecube {vid}"])
+
+    def test_second_run_skips_the_same_source_episode(self):
+        with tempfile.TemporaryDirectory() as save_dir:
+            self._run(save_dir, [SOURCE_URL])
+            FakeYoutubeDL.calls = []
+            FakeYoutubeDL.outcomes = [None]
+            _events, summary = self._run(save_dir, [SOURCE_URL])
+
+            self.assertEqual(FakeYoutubeDL.calls, [])
+            self.assertEqual(summary.skipped_count, 1)
+            self.assertEqual(summary.success_count, 0)
+
+    def test_youtube_keeps_using_the_native_download_archive(self):
+        with tempfile.TemporaryDirectory() as save_dir:
+            events, summary = self._run(save_dir, [VIDEO_URL])
+
+            self.assertEqual(FakeYoutubeDL.calls[0][0], VIDEO_URL)
+            self.assertIn("download_archive", FakeYoutubeDL.last_params)
+            self.assertEqual(summary.success_count, 1)
+            with open(os.path.join(save_dir, "downloaded.txt"),
+                      encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+            self.assertEqual(lines, [f"youtube {VIDEO_ID}"])
 
 
 if __name__ == "__main__":

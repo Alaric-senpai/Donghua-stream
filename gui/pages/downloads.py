@@ -449,6 +449,13 @@ class DownloadsView(QWidget):
             self.np_title.setText(
                 f"{data.get('index', '?')}/{data.get('total', '?')}  ·  "
                 + task_name)
+        elif ev == "source":
+            label = str(data.get("source") or "source")
+            title = str(data.get("title") or "").strip()
+            resolved = str(data.get("resolved_url") or "").strip()
+            self.on_log_line(
+                f"[source] {label}: resolved to {resolved}"
+                + (f" ({title})" if title else ""))
         elif ev == "skip":
             self.tile_eta.set("00:00", "already in archive — skipped")
         elif ev == "retry_error":

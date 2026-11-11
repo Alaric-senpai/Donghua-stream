@@ -2,7 +2,7 @@
 
 # Donghua Stream
 
-**A desktop catalog and download manager for donghua on YouTube.**
+**A desktop catalog and download manager for donghua on YouTube, AnimeCube, and DonghuaStream.**
 
 Browse your library, discover new series, and download episodes through a
 TV-streaming-style PyQt6 app — or stay in the terminal with the rich CLI.
@@ -46,12 +46,19 @@ user-owned config file.
 
 ### Discovery built in
 
-- **Explore** is an explicit YouTube search page. Nothing loads automatically:
-  search by donghua title, studio, trailer, or episode whenever you are ready.
-- A search uses `search.list` (100 units) plus one `videos.list` details call,
-  then caches the result on disk so repeating the same query is quota-free.
-- One-click **Add** to an existing series or **Add & Download** to a brand-new
-  one.
+- **Explore** is an explicit, source-aware search page. Nothing loads
+  automatically: pick YouTube, AnimeCube, or DonghuaStream and search by
+  donghua title, studio, trailer, or episode whenever you are ready.
+- YouTube search uses `search.list` (100 units) plus one `videos.list` details
+  call, then caches the result on disk so repeating the same query is
+  quota-free. AnimeCube and DonghuaStream searches read their public pages and
+  need no account or API key.
+- AnimeCube and DonghuaStream results open an episode picker: register every
+  episode, only the latest one, or any custom selection. One-click **Add** to
+  an existing series or **Add & Download** to a brand-new one.
+- Source episode pages are resolved to a direct playable URL at download time
+  (AnimeCube's encrypted source registry and DonghuaStream's embedded players),
+  while the library keeps the stable source page URL for deduplication.
 - Graceful, copyable error states for quota, network, and API-key problems.
 
 ### Download pipeline
@@ -196,7 +203,7 @@ Use `[cli]` for a CLI runtime and `[cli,gui]` for a desktop app runtime.
 | Page | What it does |
 | --- | --- |
 | **Home** | Hero spotlight, library filters, poster/list views, and quick actions |
-| **Explore** | Explicit YouTube search with cached results, add/download actions |
+| **Explore** | Source-aware YouTube / AnimeCube / DonghuaStream search with cached results, add/download actions |
 | **Library** | Every series with ready/pending counts and disk usage |
 | **Series Detail** | Episode registry, quality override, folder tools, per-episode retry |
 | **Add Donghua** | Three-step wizard: identity → storage → bulk episode paste |
@@ -315,7 +322,8 @@ flowchart LR
     CLI --> DB
     GUI --> DL[downloader.py]
     CLI --> DL
-    DL --> YT[yt-dlp → YouTube]
+    DL --> YT[yt-dlp → YouTube / Dailymotion]
+    DL --> SRC[sources.py → AnimeCube / DonghuaStream]
     DL --> FS[(Video folder + downloaded.txt)]
     GUI --> API[youtube_api.py]
     API --> YTAPI[YouTube Data API v3]
@@ -325,8 +333,10 @@ flowchart LR
 | --- | --- |
 | `app_config.py` | One JSON config: credentials, download settings, Explore options |
 | `db.py` | PostgreSQL connection, automatic database/schema creation, catalog sync |
-| `downloader.py` | yt-dlp options, quality resolution, retries, subtitles, archive, events |
-| `urls.py` | Video-ID parsing, fallback series catalog, legacy compatibility |
+| `downloader.py` | yt-dlp options, source resolution, quality, retries, subtitles, archive, events |
+| `media_ids.py` | Stable per-source video IDs and `downloaded.txt` archive tags |
+| `sources.py` | AnimeCube and DonghuaStream search, series details, and playback resolution |
+| `urls.py` | Fallback series catalog and legacy compatibility |
 | `youtube_api.py` | YouTube Data API client with disk cache and friendly errors |
 | `script.py` | Rich interactive CLI and command-line entry point |
 | `gui/` | PyQt6 app: pages, components, dialogs, and infrastructure adapters |
@@ -342,7 +352,9 @@ The GUI keeps PostgreSQL and network work off the UI thread through
 ├── app_config.py               # shared JSON configuration
 ├── db.py                       # PostgreSQL catalog
 ├── downloader.py               # yt-dlp engine and retry policy
-├── urls.py                     # URL parsing + fallback catalog
+├── media_ids.py                # stable source IDs + archive tags
+├── sources.py                  # AnimeCube / DonghuaStream clients
+├── urls.py                     # fallback catalog + legacy compatibility
 ├── youtube_api.py              # YouTube Data API client
 ├── script.py                   # CLI entry point
 ├── gui_entry.py                # donghua-gui launcher + CLI delegation

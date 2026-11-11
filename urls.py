@@ -5,9 +5,10 @@ PostgreSQL integration via db.py.
 """
 
 import os
-import re
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
+
+from media_ids import extract_video_id
 
 # ==============================================================================
 # Save Directories (Historical & Default paths)
@@ -362,12 +363,6 @@ SERIES_CATALOG: Dict[str, Series] = {
 # ==============================================================================
 # Helper Utilities (With Dynamic PostgreSQL Integration)
 # ==============================================================================
-
-def extract_video_id(url: str) -> str:
-    """Extract YouTube 11-char video ID from various URL formats."""
-    m = re.search(r"(?:v=|youtu\.be\/|\/embed\/|\/v\/)([0-9A-Za-z_-]{11})", url)
-    return m.group(1) if m else url.strip()
-
 
 def get_all_series() -> List[Series]:
     """Return all configured series from PostgreSQL store if available, else static catalog."""

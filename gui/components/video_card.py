@@ -112,18 +112,18 @@ class ChannelAvatar(QWidget):
         self.setFixedSize(size, size)
         self._size = size
         self._thumbs = thumbs
-        self._letter = (str(name or "YouTube").strip() or "Y")[:1].upper()
-        self._key = f"ytchan:{channel_id or name or 'youtube'}"
+        self._letter = (str(name or "Source").strip() or "S")[:1].upper()
+        self._key = f"chan:{channel_id or name or 'source'}"
         self._pix: Optional[QPixmap] = None
         if url:
             self._pix = thumbs.get_url(self._key, url)
-        self.setToolTip(str(name or "YouTube"))
+        self.setToolTip(str(name or "Source"))
 
     def set_source(self, channel_id: str, url: str, name: str) -> None:
         """Point the avatar at a channel, fetching artwork when available."""
-        name = str(name or "YouTube")
-        key = f"ytchan:{channel_id or name or 'youtube'}"
-        self._letter = (name.strip() or "Y")[:1].upper()
+        name = str(name or "Source")
+        key = f"chan:{channel_id or name or 'source'}"
+        self._letter = (name.strip() or "S")[:1].upper()
         self.setToolTip(name)
         if key == self._key and (not url or self._pix is not None):
             return
@@ -186,7 +186,8 @@ class VideoThumb(QWidget):
         super().__init__(parent)
         self.thumbs = thumbs
         self.video = video
-        self.key = f"yt:{video.get('id', '')}"
+        self.key = (
+            f"card:{video.get('source') or 'youtube'}:{video.get('id', '')}")
         self._pix: Optional[QPixmap] = thumbs.get_url(
             self.key, str(video.get("thumbnail") or ""))
         self._hovered = False
@@ -309,7 +310,7 @@ class CardActions(QWidget):
             lambda: self._card.download_requested.emit(dict(self._card.video)))
         row.addWidget(self.download_btn)
 
-        self.open_btn = icon_btn("", "Open on YouTube")
+        self.open_btn = icon_btn("", "Open the source page")
         self.open_btn.setIcon(icon("external", T_TEXT, 14))
         self.open_btn.setIconSize(QSize(14, 14))
         self.open_btn.setFixedSize(30, 30)
@@ -343,7 +344,7 @@ class VideoCard(QWidget):
         self.setToolTip(
             f"{self.video.get('title', '')}\n"
             f"{self.video.get('channel', '')}\n"
-            "Double-click to open on YouTube")
+            "Double-click to open the source page")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -359,7 +360,7 @@ class VideoCard(QWidget):
             thumbs,
             str(self.video.get("channel_id") or ""),
             str(self.video.get("channel_avatar") or ""),
-            str(self.video.get("channel") or "YouTube"),
+            str(self.video.get("channel") or "Source"),
             36,
         )
         info.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
@@ -370,12 +371,12 @@ class VideoCard(QWidget):
         self.title_label = TwoLineLabel(str(self.video.get("title") or ""))
         text.addWidget(self.title_label)
         self.channel_label = ElidedLabel(
-            str(self.video.get("channel") or "YouTube"), color=T_SEC, size=12)
+            str(self.video.get("channel") or "Source"), color=T_SEC, size=12)
         text.addWidget(self.channel_label)
         views = str(self.video.get("views_text") or "").strip()
         age = str(self.video.get("age_text") or "").strip()
         meta = "  ·  ".join(bit for bit in (views, age) if bit)
-        self.meta_label = ElidedLabel(meta or "YouTube", color=T_MUTED, size=11)
+        self.meta_label = ElidedLabel(meta or "Source", color=T_MUTED, size=11)
         text.addWidget(self.meta_label)
         info.addLayout(text, 1)
         outer.addLayout(info)
