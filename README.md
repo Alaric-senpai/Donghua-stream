@@ -46,16 +46,20 @@ user-owned config file.
 
 ### Discovery built in
 
-- **Explore** is an explicit, source-aware search page. Nothing loads
-  automatically: pick YouTube, AnimeCube, or DonghuaStream and search by
-  donghua title, studio, trailer, or episode whenever you are ready.
+- **Explore** has one screen per source behind a tab bar. YouTube keeps its
+  quota-aware search page; AnimeCube and DonghuaStream get their own catalog
+  screens that open on the site's trending series and search the public
+  catalog without an account or API key.
 - YouTube search uses `search.list` (100 units) plus one `videos.list` details
   call, then caches the result on disk so repeating the same query is
   quota-free. AnimeCube and DonghuaStream searches read their public pages and
   need no account or API key.
-- AnimeCube and DonghuaStream results open an episode picker: register every
-  episode, only the latest one, or any custom selection. One-click **Add** to
-  an existing series or **Add & Download** to a brand-new one.
+- Selecting a series opens a full **show details** screen: source artwork,
+  synopsis, metadata (status, year, genres, quality), the complete episode
+  list with All/None/Latest selection, and the site's own recommendations.
+- From that screen the whole show can be recorded to the library in one go,
+  or added to an existing library series, with an optional immediate
+  download.
 - Source episode pages are resolved to a direct playable URL at download time
   (AnimeCube's encrypted source registry and DonghuaStream's embedded players),
   while the library keeps the stable source page URL for deduplication.
@@ -203,7 +207,7 @@ Use `[cli]` for a CLI runtime and `[cli,gui]` for a desktop app runtime.
 | Page | What it does |
 | --- | --- |
 | **Home** | Hero spotlight, library filters, poster/list views, and quick actions |
-| **Explore** | Source-aware YouTube / AnimeCube / DonghuaStream search with cached results, add/download actions |
+| **Explore** | Tabbed per-source screens: YouTube search, AnimeCube / DonghuaStream trending catalogs and show details |
 | **Library** | Every series with ready/pending counts and disk usage |
 | **Series Detail** | Episode registry, quality override, folder tools, per-episode retry |
 | **Add Donghua** | Three-step wizard: identity → storage → bulk episode paste |
@@ -335,7 +339,7 @@ flowchart LR
 | `db.py` | PostgreSQL connection, automatic database/schema creation, catalog sync |
 | `downloader.py` | yt-dlp options, source resolution, quality, retries, subtitles, archive, events |
 | `media_ids.py` | Stable per-source video IDs and `downloaded.txt` archive tags |
-| `sources.py` | AnimeCube and DonghuaStream search, series details, and playback resolution |
+| `sources.py` | AnimeCube and DonghuaStream search, series details, recommendations, and playback resolution |
 | `urls.py` | Fallback series catalog and legacy compatibility |
 | `youtube_api.py` | YouTube Data API client with disk cache and friendly errors |
 | `script.py` | Rich interactive CLI and command-line entry point |
@@ -354,6 +358,9 @@ The GUI keeps PostgreSQL and network work off the UI thread through
 ├── downloader.py               # yt-dlp engine and retry policy
 ├── media_ids.py                # stable source IDs + archive tags
 ├── sources.py                  # AnimeCube / DonghuaStream clients
+├── gui/pages/explore_host.py   # per-source Explore tabs
+├── gui/pages/source_explore.py # AnimeCube / DonghuaStream catalog screen
+├── gui/pages/source_detail.py  # show details + episode registry
 ├── urls.py                     # fallback catalog + legacy compatibility
 ├── youtube_api.py              # YouTube Data API client
 ├── script.py                   # CLI entry point

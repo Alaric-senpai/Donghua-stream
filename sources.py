@@ -181,7 +181,7 @@ def _series_card(*, source: str, source_label: str, slug: str, title: str,
                  url: str, thumbnail: str, description: str = "",
                  season_title: str = "", latest_episode: str = "",
                  quality: str = "", episode_count: Optional[int] = None,
-                 updated_at: str = "") -> Dict[str, Any]:
+                 updated_at: str = "", status: str = "") -> Dict[str, Any]:
     meta = [bit for bit in (season_title, quality) if bit]
     if latest_episode:
         meta.append(f"Latest EP {latest_episode}")
@@ -210,6 +210,7 @@ def _series_card(*, source: str, source_label: str, slug: str, title: str,
         "source": source,
         "kind": "series",
         "episode_count": episode_count,
+        "status": status,
     }
 
 
@@ -482,6 +483,9 @@ class AnimeCubeSource:
             ep.get("episode_number") or 0, ep.get("id") or ""))
 
         title = str(anime.get("title") or slug).strip()
+        genre_list = list(anime.get("genres") or [])
+        recommendations = self._recommendations(
+            slug, genre_list, refresh=refresh)
         return {
             "source": self.key,
             "kind": "series",
@@ -492,11 +496,45 @@ class AnimeCubeSource:
             "url": f"{ANIMECUBE_BASE}/anime/{urllib.parse.quote(slug)}",
             "channel": self.label,
             "channel_id": self.key,
-            "genres": list(anime.get("genres") or []),
+            "genres": genre_list,
             "year": anime.get("year"),
             "episode_count": len(episodes),
             "episodes": episodes,
+            "recommendations": recommendations,
         }
+
+    def _recommendations(self, slug: str, genres: List[str],
+                         *, refresh: bool = False,
+                         limit: int = 6) -> List[Dict[str, Any]]:
+        """Nearest neighbours by shared genre + rating, from the same catalog.
+
+        AnimeCube exposes no per-series recommendation feed, so this ranks
+        the public catalog's own data (shared genres, then rating).
+        """
+        try:
+            catalog = self._catalog(refresh=refresh)
+        except SourceError:
+            return []
+        owned = {str(genre).lower() for genre in genres or [] if str(genre)}
+        scored: List[Tuple[int, float, Dict[str, Any]]] = []
+        for item in catalog:
+            item_slug = str(item.get("slug") or "").strip()
+            if not item_slug or item_slug == slug:
+                continue
+            shared = len(owned.intersection(
+                str(genre).lower()
+                for genre in item.get("genres") or []))
+            try:
+                rating = float(item.get("rating") or 0)
+            except (TypeError, ValueError):
+                rating = 0.0
+            scored.append((shared, rating, item))
+        scored.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
+        picks = [item for shared, _rating, item in scored if shared][:limit]
+        if len(picks) < limit:  # top up with the highest-rated remainder
+            picks += [item for _shared, _rating, item in scored
+                      if item not in picks][:limit - len(picks)]
+        return [self._card(item) for item in picks]
 
     # ---- resolve ----------------------------------------------------------
     def _versions(self, *, refresh: bool = False) -> Dict[str, Any]:
@@ -626,6 +664,18 @@ class AnimeCubeSource:
 # ---------------------------------------------------------------------------
 # DonghuaStream
 # ---------------------------------------------------------------------------
+def _dhs_image(article: str) -> str:
+    """Return the real artwork URL from a DHS card, not the base64 placeholder."""
+    data_src = re.search(r'data-src="([^"]+)"', article)
+    if data_src and not data_src.group(1).startswith("data:"):
+        return html_lib.unescape(data_src.group(1)).strip()
+    tag = re.search(r'<img[^>]+src="([^"]+)"', article)
+    if not tag:
+        return ""
+    src = html_lib.unescape(tag.group(1)).strip()
+    return "" if src.startswith("data:") else src
+
+
 def _dhs_series_url(url: str) -> str:
     text = str(url or "").strip()
     parsed = urllib.parse.urlparse(text)
@@ -684,14 +734,11 @@ class DonghuaStreamSource:
         limit = max(1, int(max_results or 18))
         return list(results or [])[:limit]
 
-    def _parse_search(self, page: str) -> List[Dict[str, Any]]:
-        block = re.search(
-            r'<div class="listupd">(.*?)</div>\s*</div>', page, re.S)
-        body = block.group(1) if block else page
+    def _parse_bs_cards(self, html: str) -> List[Dict[str, Any]]:
         cards: List[Dict[str, Any]] = []
         seen = set()
         for article in re.findall(
-                r'<article class="bs".*?</article>', body, re.S):
+                r'<article class="bs".*?</article>', html, re.S):
             link = re.search(
                 r'<a href="([^"]+)"[^>]*itemprop="url"[^>]*title="([^"]*)"',
                 article, re.S)
@@ -710,18 +757,38 @@ class DonghuaStreamSource:
                 r'<div class="tt">\s*(?:<a[^>]*>)?([^<]+)', article, re.S)
             if title_match:
                 title = _strip_tags(title_match.group(1)) or title
-            image = re.search(r'<img[^>]+src="([^"]+)"', article)
             slug = series_url.rstrip("/").split("/")[-1]
+            status = ""
+            badge = re.search(r'<span class="epx">(.*?)</span>', article, re.S)
+            if badge:
+                status = _strip_tags(badge.group(1))
             cards.append(_series_card(
                 source=self.key,
                 source_label=self.label,
                 slug=slug,
                 title=title,
                 url=series_url,
-                thumbnail=html_lib.unescape(image.group(1)).strip()
-                if image else "",
+                thumbnail=_dhs_image(article),
+                status=status,
             ))
         return cards
+
+    def _parse_search(self, page: str) -> List[Dict[str, Any]]:
+        return self._parse_bs_cards(page)
+
+    def _catalog(self, *, refresh: bool = False) -> List[Dict[str, Any]]:
+        """Series sorted by latest update order, as listed by the site itself."""
+        def load() -> List[Dict[str, Any]]:
+            page = _get_text(
+                f"{DONGHUASTREAM_BASE}/anime/?status=&type=&order=update")
+            cards = self._parse_bs_cards(page)
+            if not cards:
+                raise SourceError(
+                    "DonghuaStream's series list page did not contain any "
+                    "series. The site layout may have changed.",
+                    source=self.key)
+            return cards
+        return _cached("donghuastream", "catalog", load, refresh=refresh)
 
     # ---- details ----------------------------------------------------------
     def details(self, url: str, *, refresh: bool = False) -> Dict[str, Any]:
@@ -795,6 +862,8 @@ class DonghuaStreamSource:
         episodes.sort(key=lambda ep: (
             ep.get("episode_number") or 0, ep.get("url") or ""))
 
+        recommendations = self._parse_recommendations(page)
+
         slug = series_url.rstrip("/").split("/")[-1]
         return {
             "source": self.key,
@@ -808,7 +877,21 @@ class DonghuaStreamSource:
             "channel_id": self.key,
             "episode_count": len(episodes),
             "episodes": episodes,
+            "recommendations": recommendations,
         }
+
+    def _parse_recommendations(self, page: str) -> List[Dict[str, Any]]:
+        """The site's own "Recommended Series" block from a series page."""
+        index = page.find("Recommended Series")
+        if index < 0:
+            return []
+        chunk = page[index:index + 40000]
+        cards = self._parse_bs_cards(chunk)
+        # The block ends at the next major section heading.
+        end = chunk.find('<div class="section">')
+        if end > 0:
+            cards = self._parse_bs_cards(chunk[:end])
+        return cards[:8]
 
     # ---- resolve ----------------------------------------------------------
     def resolve(self, url: str, *, refresh: bool = False) -> Dict[str, Any]:

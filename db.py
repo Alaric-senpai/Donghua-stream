@@ -678,6 +678,28 @@ def get_episodes(series_id: int, status: Optional[str] = None) -> List[Dict[str,
             return [dict(r) for r in rows]
 
 
+def get_episodes_by_ids(video_ids: List[str]) -> List[Dict[str, Any]]:
+    """Retrieve episodes matching any of the given video_ids from any series.
+
+    Used to check if episodes discovered from a source are already registered
+    in the library, without needing a series_id.
+    """
+    if not video_ids:
+        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM episodes
+                WHERE video_id = ANY(%s)
+                ORDER BY series_id, id ASC;
+                """,
+                (list(video_ids),),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+
+
 def mark_episode_status(series_id: int, video_id: str, status: str) -> bool:
     """Update status ('downloaded' or 'failed') for an episode."""
     with get_connection() as conn:
