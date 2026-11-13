@@ -27,6 +27,8 @@ BUILD_VENV="$RUNTIME_ROOT/.build"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$DATA_HOME/applications"
 DESKTOP_FILE="$DESKTOP_DIR/donghua-stream.desktop"
+ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+ICON_FILE="$ICON_DIR/donghua-stream.png"
 
 MODE="${1:-all}"
 WHEEL=""
@@ -177,6 +179,9 @@ if os.environ.get("VERIFY_GUI") == "1":
     icon = pathlib.Path(ASSET_DIR / "play.svg")
     if not icon.is_file():
         raise SystemExit(f"packaged icon missing: {icon}")
+    app_icon = pathlib.Path(ASSET_DIR / "app-icon.png")
+    if not app_icon.is_file():
+        raise SystemExit(f"packaged app icon missing: {app_icon}")
     print(f"    GUI imports and packaged assets OK: {icon}")
 PY
     )
@@ -186,6 +191,20 @@ verify_cli() {
     echo "==> verifying donghua CLI"
     (cd /tmp && "$RUNTIME_ROOT/cli/bin/donghua" --help >/dev/null)
     echo "    donghua --help OK"
+}
+
+install_icon() {
+    # The app icon is a mosaic built from the artwork the app caches.
+    local source="$PROJECT_DIR/gui/assets/icons/app-icon.png"
+    if [ ! -f "$source" ]; then
+        echo "    app icon not found, keeping the theme icon" >&2
+        return 0
+    fi
+    mkdir -p "$ICON_DIR"
+    cp -f "$source" "$ICON_FILE"
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+        gtk-update-icon-cache -f -t "$HOME/.local/share/icons" >/dev/null 2>&1 || true
+    echo "    desktop icon: $ICON_FILE"
 }
 
 write_desktop_entry() {
@@ -199,7 +218,7 @@ GenericName=Donghua Video Downloader
 Comment=TV-streaming-style desktop app for downloading donghua episodes (yt-dlp + PostgreSQL)
 Exec=$BIN_DIR/donghua-gui
 TryExec=$BIN_DIR/donghua-gui
-Icon=video-x-generic
+Icon=donghua-stream
 Terminal=false
 Categories=Network;AudioVideo;Video;
 Keywords=donghua;anime;youtube;downloader;yt-dlp;
@@ -275,6 +294,7 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "app" ]; then
     install_runtime app "cli,gui"
     verify_runtime app 1
     link_launcher app donghua-gui
+    install_icon
     write_desktop_entry
 fi
 

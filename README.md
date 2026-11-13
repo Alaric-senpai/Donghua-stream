@@ -57,9 +57,14 @@ user-owned config file.
 - Selecting a series opens a full **show details** screen: source artwork,
   synopsis, metadata (status, year, genres, quality), the complete episode
   list with All/None/Latest selection, and the site's own recommendations.
-- From that screen the whole show can be recorded to the library in one go,
-  or added to an existing library series, with an optional immediate
-  download.
+  The page scrolls as one column — the episode list takes the room it needs
+  and the recommendations follow underneath it.
+- One **Add Series** button carries both routes: *add to an existing library
+  series* or *create a new series from scratch and add it*. Adding either way
+  refreshes Home and Library immediately, so the new entry is there at once.
+- The app's own icon and banner are generated from the artwork the app has
+  already cached (`tools/make_brand_assets.py`), so the identity is made of
+  the shows it tracks.
 - Source episode pages are resolved to a direct playable URL at download time
   (AnimeCube's encrypted source registry and DonghuaStream's embedded players),
   while the library keeps the stable source page URL for deduplication.
@@ -361,6 +366,7 @@ The GUI keeps PostgreSQL and network work off the UI thread through
 ├── gui/pages/explore_host.py   # per-source Explore tabs
 ├── gui/pages/source_explore.py # AnimeCube / DonghuaStream catalog screen
 ├── gui/pages/source_detail.py  # show details + episode registry
+├── tools/make_brand_assets.py  # builds the app icon + banner from cache
 ├── urls.py                     # fallback catalog + legacy compatibility
 ├── youtube_api.py              # YouTube Data API client
 ├── script.py                   # CLI entry point

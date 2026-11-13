@@ -163,6 +163,52 @@ class SourceDetailTests(_Base):
         view._check_all()
         self.assertEqual(len(view._selected_episodes()), 2)
 
+    def test_add_button_offers_existing_and_new_series(self):
+        view = SourceDetailView(self.thumbs)
+        self.addCleanup(view.shutdown)
+        self._load(view)
+
+        labels = [action.text() for action in view.add_menu.actions()]
+        self.assertEqual(len(labels), 2)
+        self.assertIn("existing", labels[0].lower())
+        self.assertIn("new", labels[1].lower())
+
+        seen = []
+
+        def _capture(details, series_list, download_now=False,
+                     target_mode="any", parent=None):
+            seen.append(target_mode)
+            return None
+
+        with mock.patch("gui.pages.source_detail.prompt_source_episodes",
+                        side_effect=_capture):
+            view._add_series("existing")
+            view._add_series("new")
+
+        self.assertEqual(seen, ["existing", "new"])
+
+    def test_saving_emits_a_library_refresh(self):
+        view = SourceDetailView(self.thumbs)
+        self.addCleanup(view.shutdown)
+        self._load(view)
+
+        changed = []
+        view.library_changed.connect(lambda sid: changed.append(sid))
+
+        payload = {
+            "series_id": 31, "new_name": "", "download_now": False,
+            "episodes": DETAILS["episodes"], "source": "animecube",
+            "source_url": DETAILS["url"], "title": DETAILS["title"],
+        }
+        with mock.patch(
+                "gui.pages.source_detail.prompt_source_episodes",
+                return_value=payload), mock.patch(
+                    "gui.pages.source_detail.db.add_episode_entries",
+                    return_value={"added": 2, "updated": 0, "total": 2}):
+            view._add_series("existing")
+
+        self.assertEqual(changed, [31])
+
     def test_adding_the_series_saves_entries_and_can_queue_downloads(self):
         view = SourceDetailView(self.thumbs)
         self.addCleanup(view.shutdown)
@@ -188,7 +234,7 @@ class SourceDetailTests(_Base):
                 return_value=payload), mock.patch(
                     "gui.pages.source_detail.db.add_episode_entries",
                     return_value={"added": 2, "updated": 0, "total": 2}):
-            view._add_full_series()
+            view._add_series("existing")
 
         self.assertEqual(len(queued), 1)
         self.assertEqual(queued[0][0], 12)

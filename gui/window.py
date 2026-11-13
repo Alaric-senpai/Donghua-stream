@@ -121,6 +121,8 @@ class MainWindow(QMainWindow):
         self.source_detail_view.series_selected.connect(self._open_source_series)
         self.source_detail_view.download_requested.connect(
             self._download_source_episodes)
+        self.source_detail_view.library_changed.connect(
+            self._on_library_changed)
         self.library_view.series_opened.connect(self.open_series)
         self.library_view.series_download_all.connect(self._download_all_for)
         self.library_view.series_folder.connect(self._open_folder_series)
@@ -446,6 +448,15 @@ class MainWindow(QMainWindow):
         title = str(series.get("title") or series.get("name") or "")
         self.header.set_breadcrumb(f"{label} / {title}" if title else label)
         self.header.set_back_visible(True)
+
+    def _on_library_changed(self, series_id: int) -> None:
+        """A source series was registered: reload Home and Library at once.
+
+        Without this the new series (or the extra episodes of an existing
+        one) would only appear after a manual restart or sync.
+        """
+        sid = int(series_id or 0) or None
+        self.refresh_full(sid)
 
     def _download_source_episodes(self, series_id: int,
                                   urls: List[str]) -> None:

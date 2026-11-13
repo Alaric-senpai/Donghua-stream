@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import QSize, Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -98,6 +98,8 @@ class SourceDetailView(QWidget):
     series_selected = pyqtSignal(str, dict)   # source_key, series_data
     # series_id, urls — emitted when the add flow opted into immediate download
     download_requested = pyqtSignal(int, list)
+    # series_id — emitted after the library changed, so the window refreshes
+    library_changed = pyqtSignal(int)
 
     def __init__(self, thumbs: ThumbnailStore, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -111,19 +113,34 @@ class SourceDetailView(QWidget):
         self._workers: List[ExploreWorker] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(28, 12, 28, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # One scroll area for the whole page: the episode list takes the room
+        # it needs and the recommendations follow underneath it.
+        self.page_scroll = QScrollArea()
+        self.page_scroll.setWidgetResizable(True)
+        self.page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.page_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        host = QWidget()
+        host.setObjectName("scrollHost")
+        content = QVBoxLayout(host)
+        content.setContentsMargins(28, 14, 28, 24)
+        content.setSpacing(16)
 
         # ---- hero info card
-        self._build_hero_card(root)
+        self._build_hero_card(content)
 
         # ---- episode registry section
-        self._build_registry_section(root)
+        self._build_registry_section(content)
 
         # ---- recommendations rail
-        self._build_recommendations_rail(root)
+        self._build_recommendations_rail(content)
 
-        root.addStretch(1)
+        content.addStretch(1)
+        self.page_scroll.setWidget(host)
+        root.addWidget(self.page_scroll)
 
     # ---- hero card ------------------------------------------------------------
     def _build_hero_card(self, root: QVBoxLayout) -> None:
@@ -166,13 +183,25 @@ class SourceDetailView(QWidget):
         # Action buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        self.add_full_btn = btn("Add Full Series", "primary")
+        self.add_full_btn = btn("Add Series", "primary")
         self.add_full_btn.setIcon(icon("plus", T_ON_PRIMARY, 13))
         self.add_full_btn.setIconSize(QSize(13, 13))
-        self.add_full_btn.clicked.connect(self._add_full_series)
+        # One button, two ways in: attach to an existing library series or
+        # create a brand-new one from scratch.
+        self.add_menu = QMenu(self.add_full_btn)
+        self._act_existing = self.add_menu.addAction(
+            "Add to an existing series…")
+        self._act_new = self.add_menu.addAction(
+            "Create a new series and add it…")
+        self._act_existing.triggered.connect(
+            lambda: self._add_series("existing"))
+        self._act_new.triggered.connect(lambda: self._add_series("new"))
+        self.add_full_btn.setMenu(self.add_menu)
         btn_row.addWidget(self.add_full_btn)
 
-        self.add_sel_btn = btn("Add Selected", "ghost")
+        self.add_sel_btn = btn("Add Selected Episodes…", "ghost")
+        self.add_sel_btn.setToolTip(
+            "Register only the checked episodes of this series")
         self.add_sel_btn.clicked.connect(self._add_selected)
         btn_row.addWidget(self.add_sel_btn)
 
@@ -220,19 +249,11 @@ class SourceDetailView(QWidget):
         reg_head.addWidget(self.search)
         root.addLayout(reg_head)
 
+        # The list grows to fit every episode; the page itself scrolls.
         self.rows_host = StackList(spacing=6)
-        self.area = QScrollArea()
-        self.area.setWidgetResizable(True)
-        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        host = QWidget()
-        host.setObjectName("scrollHost")
-        hl = QVBoxLayout(host)
-        hl.setContentsMargins(0, 0, 4, 0)
-        hl.setSpacing(8)
-        hl.addWidget(self.rows_host)
-        hl.addStretch(1)
-        self.area.setWidget(host)
-        root.addWidget(self.area, 1)
+        self.rows_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        root.addWidget(self.rows_host)
 
     # ---- recommendations rail -------------------------------------------------
     def _build_recommendations_rail(self, root: QVBoxLayout) -> None:
@@ -250,8 +271,9 @@ class SourceDetailView(QWidget):
         self.rec_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.rec_scroll.setWidgetResizable(True)
         self.rec_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.rec_scroll.setMinimumHeight(196)
-        self.rec_scroll.setMaximumHeight(220)
+        self.rec_scroll.setFixedHeight(214)
+        self.rec_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         rec_host = QWidget()
         rec_host.setObjectName("scrollHost")
@@ -485,28 +507,35 @@ class SourceDetailView(QWidget):
         return result
 
     # ---- action handlers ------------------------------------------------------
-    def _add_full_series(self) -> None:
+    def _add_series(self, target_mode: str = "existing") -> None:
+        """Add every episode of the show to the library.
+
+        ``target_mode`` decides how the dialog starts: on an existing library
+        series, or on the "create a new series" entry.
+        """
         if not self._details:
             return
         chosen = list(self._details.get("episodes") or [])
         if not chosen:
             self.toast.emit("No episodes found on this source page.", False)
             return
-        self._open_dialog(chosen)
+        self._open_dialog(chosen, target_mode=target_mode)
 
     def _add_selected(self) -> None:
         chosen = self._selected_episodes()
         if not chosen:
             self.toast.emit("No episodes selected.", False)
             return
-        self._open_dialog(chosen)
+        self._open_dialog(chosen, target_mode="any")
 
-    def _open_dialog(self, episodes: List[Dict[str, Any]]) -> None:
+    def _open_dialog(self, episodes: List[Dict[str, Any]],
+                     target_mode: str = "any") -> None:
         details = dict(self._details)
         details["episodes"] = episodes
 
         payload = prompt_source_episodes(details, self._get_library_series(),
-                                         download_now=False, parent=self)
+                                         download_now=False,
+                                         target_mode=target_mode, parent=self)
         if not payload:
             return
 
@@ -550,6 +579,9 @@ class SourceDetailView(QWidget):
                     self.download_requested.emit(series_id, urls)
                     message = f"Queued {len(urls)} episode(s) for download."
             self.toast.emit(message, True)
+            # The library changed: let the window reload Home/Library so the
+            # new series (or the updated one) shows up immediately.
+            self.library_changed.emit(series_id)
 
             # Refresh registration indicators
             video_ids = [extract_video_id(str(ep.get("url") or ""))

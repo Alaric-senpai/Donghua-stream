@@ -36,9 +36,14 @@ class SourceEpisodesDialog(QDialog):
     def __init__(self, details: Dict[str, Any],
                  series_list: List[Dict[str, Any]],
                  download_now: bool = False,
+                 target_mode: str = "any",
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.details = dict(details or {})
+        # "any"     — existing series first, plus a "create new" entry
+        # "existing"— only existing library series may be targeted
+        # "new"     — start on the "create a new series" entry
+        self.target_mode = str(target_mode or "any")
         self._series = list(series_list or [])
         self.episodes = sorted(
             list(self.details.get("episodes") or []),
@@ -61,9 +66,10 @@ class SourceEpisodesDialog(QDialog):
         head.setSpacing(2)
         head.addWidget(eyebrow("Save a source series"))
         head.addWidget(mk_label("Add Series to Library", "display"))
-        head.addWidget(mk_label(
+        self._head_note = mk_label(
             "Choose which episodes to register, then pick the series that "
-            "should own them.", "body", "muted"))
+            "should own them.", "body", "muted")
+        head.addWidget(self._head_note)
         root.addLayout(head)
 
         card = QFrame()
@@ -107,8 +113,15 @@ class SourceEpisodesDialog(QDialog):
             self.target.addItem(
                 f"{series.get('name', 'Untitled')}  ·  {done}/{total} episodes",
                 int(series.get("id", 0)))
-        self.target.addItem("＋  Create a new series…", None)
+        self._new_index = -1
+        if self.target_mode != "existing":
+            self._new_index = self.target.count()
+            self.target.addItem("＋  Create a new series…", None)
+        if self.target_mode == "existing" and self._new_index == 0:
+            # No library series yet: fall back to creating one.
+            self.target_mode = "new"
         self.target.currentIndexChanged.connect(self._on_target_changed)
+        self.target.setVisible(self.target_mode != "new")
         cl.addWidget(self.target)
 
         self.new_name = QLineEdit(_suggest_name(self.details))
@@ -188,6 +201,12 @@ class SourceEpisodesDialog(QDialog):
         foot.addWidget(self.save_btn)
         root.addLayout(foot)
 
+        if self.target_mode == "new":
+            if self._new_index >= 0:
+                self.target.setCurrentIndex(self._new_index)
+            self.new_name.setFocus()
+        elif self.target_mode == "existing" and self.target.count() > 0:
+            self.target.setCurrentIndex(0)
         self._on_target_changed()
         self._sync_selection()
 
@@ -221,19 +240,26 @@ class SourceEpisodesDialog(QDialog):
 
     # ---- target series -----------------------------------------------------
     def _target_id(self) -> Optional[int]:
+        if self.target_mode == "new":
+            return None
         data = self.target.currentData()
         return int(data) if data is not None else None
 
     def _on_target_changed(self) -> None:
         creating = self._target_id() is None
-        self.new_name.setVisible(creating)
-        self.new_hint.setVisible(creating)
+        self.new_name.setVisible(creating or self.target_mode == "new")
+        self.new_hint.setVisible(creating or self.target_mode == "new")
         if creating:
             raw = self.new_name.text().strip() or "New Donghua"
             path = f"~/Videos/{raw.replace(' ', '')}"
             self.new_hint.setText(f"Save folder will be created under {path}")
         self.error.hide()
         self._sync_button_text()
+
+    def _target_label(self) -> str:
+        if self.target_mode == "new":
+            return "Create a new series"
+        return "Add to an existing series"
 
     def _sync_button_text(self) -> None:
         action = ("Add & Download" if self.download_chk.isChecked()
@@ -273,9 +299,16 @@ def prompt_source_episodes(
         details: Dict[str, Any],
         series_list: List[Dict[str, Any]],
         download_now: bool = False,
+        target_mode: str = "any",
         parent: Optional[QWidget] = None) -> Optional[Dict[str, Any]]:
+    """Ask where the episodes should land.
+
+    ``target_mode`` is "any", "existing" or "new" and decides where the
+    target selector starts.
+    """
     dialog = SourceEpisodesDialog(
-        details, series_list, download_now=download_now, parent=parent)
+        details, series_list, download_now=download_now,
+        target_mode=target_mode, parent=parent)
     if dialog.exec() == QDialog.DialogCode.Accepted:
         return dialog.payload()
     return None

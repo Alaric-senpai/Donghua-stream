@@ -10,7 +10,7 @@ import app_config
 from .dialogs.credentials import prompt_for_credentials
 from .dialogs.error_dialog import report_error
 from .errors import install_exception_hook
-from .icons import icon
+from .icons import app_icon, icon
 from .theme import F_BODY, T_PRIMARY, app_stylesheet
 from .window import MainWindow
 
@@ -51,7 +51,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     app.setStyle("Fusion")
     app.setFont(QFont(F_BODY, 10))
     app.setStyleSheet(app_stylesheet())
-    window_icon = icon("play", T_PRIMARY, 64)
+    window_icon = app_icon(512)
+    if window_icon.isNull():
+        window_icon = icon("play", T_PRIMARY, 64)
     if window_icon.isNull():
         window_icon = QIcon.fromTheme("applications-multimedia")
     app.setWindowIcon(window_icon)

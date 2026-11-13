@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 )
 
 import db
-from ..icons import icon
+from ..icons import app_icon, icon
 from ..theme import (
     T_EMERALD2, T_MUTED, T_ON_PRIMARY, T_PRIMARY, T_ROSE2, T_SEC,
 )
@@ -43,9 +43,13 @@ class Sidebar(QWidget):
         logo = QLabel()
         logo.setFixedSize(38, 38)
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setStyleSheet(
-            f"background: {T_PRIMARY}; border-radius: 11px;")
-        logo.setPixmap(icon("play", T_ON_PRIMARY, 16).pixmap(16, 16))
+        brand_icon = app_icon(512)
+        if brand_icon.isNull():
+            logo.setStyleSheet(
+                f"background: {T_PRIMARY}; border-radius: 11px;")
+            logo.setPixmap(icon("play", T_ON_PRIMARY, 16).pixmap(16, 16))
+        else:
+            logo.setPixmap(brand_icon.pixmap(38, 38))
         brand.addWidget(logo)
         btxt = QVBoxLayout()
         btxt.setSpacing(0)

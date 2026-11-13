@@ -66,5 +66,22 @@ class SourceDialogTests(unittest.TestCase):
         dialog.close()
 
 
+    def test_target_modes_pick_existing_or_new(self):
+        series = [{"id": 7, "name": "Existing", "downloaded_episodes": 1,
+                   "total_episodes": 3}]
+
+        existing = SourceEpisodesDialog(DETAILS, series, target_mode="existing")
+        self.assertEqual(existing._target_id(), 7)
+        self.assertFalse(existing.new_name.isVisibleTo(existing))
+        self.assertEqual(existing.target.count(), 1)
+        existing.close()
+
+        created = SourceEpisodesDialog(DETAILS, series, target_mode="new")
+        self.assertIsNone(created._target_id())
+        self.assertTrue(created.new_name.isVisibleTo(created))
+        self.assertFalse(created.target.isVisibleTo(created))
+        created.close()
+
+
 if __name__ == "__main__":
     unittest.main()

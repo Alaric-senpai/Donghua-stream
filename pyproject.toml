@@ -67,4 +67,5 @@ include = ["gui", "gui.*"]
 [tool.setuptools.package-data]
 gui = [
     "assets/icons/*.svg",
+    "assets/icons/*.png",
 ]

@@ -14,6 +14,34 @@ def asset_path(name: str) -> str:
     return (ASSET_DIR / name).as_posix()
 
 
+APP_ICON_NAME = "app-icon.png"
+APP_BANNER_NAME = "app-banner.png"
+
+
+@lru_cache(maxsize=8)
+def app_icon(size: int = 512) -> QIcon:
+    """The app's own icon: a mosaic of donghua artwork with the play mark.
+
+    Built by ``tools/make_brand_assets.py`` from the artwork the app has
+    already cached, so the identity is made of the shows it tracks.
+    """
+    path = ASSET_DIR / APP_ICON_NAME
+    if not path.exists():
+        return QIcon()
+    try:
+        pix = QPixmap(str(path))
+        if pix.isNull():
+            return QIcon()
+        return QIcon(pix)
+    except Exception:
+        return QIcon()
+
+
+def app_banner_path() -> str:
+    """Absolute path of the wide brand banner (PNG)."""
+    return (ASSET_DIR / APP_BANNER_NAME).as_posix()
+
+
 @lru_cache(maxsize=96)
 def icon(name: str, color: str = "#94a3b8", size: int = 18) -> QIcon:
     """Render a line SVG in `color` at a crisp 2x device pixel ratio."""
