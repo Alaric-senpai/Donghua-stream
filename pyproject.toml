@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "donghua-stream"
-version = "1.0.1"
+version = "1.1.0"
 description = "Donghua / YouTube video downloader with a TV-streaming-style PyQt6 desktop app and rich interactive CLI, backed by PostgreSQL."
 readme = "README.md"
 requires-python = ">=3.9"
