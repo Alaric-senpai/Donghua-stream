@@ -80,6 +80,64 @@ def extract_video_id(url: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# Output-file helpers (shared by the downloader and the database scanner)
+# ---------------------------------------------------------------------------
+MEDIA_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov", ".m4v")
+
+# yt-dlp writes throw-away files next to the real output while it works:
+#   NAME.part / NAME.mp4.part-Frag12.part   (in-progress fragments)
+#   NAME.temp.webm                          (a failed merge)
+#   NAME.fhls-720.mp4 / NAME.f137.mp4       (separate audio/video streams)
+# None of these is a finished episode, so the scanner must ignore them.
+_INTERMEDIATE_MARKERS = (".part", ".ytdl", ".temp.")
+_FORMAT_SUFFIX_RE = re.compile(r"\.f[a-z0-9_-]+$", re.IGNORECASE)
+
+
+def is_intermediate_media_name(name: str) -> bool:
+    """True when a file is a work-in-progress, not a finished episode."""
+    text = str(name or "")
+    if not text:
+        return True
+    lowered = text.lower()
+    if any(marker in lowered for marker in _INTERMEDIATE_MARKERS):
+        return True
+    stem, _, ext = text.rpartition(".")
+    if not stem:
+        return True
+    # "NAME.fhls-720.mp4" -> the format id marks it as a separate stream.
+    if _FORMAT_SUFFIX_RE.search(stem):
+        return True
+    return False
+
+
+def media_stem(name: str) -> str:
+    """Return the file name without its media extension, normalised."""
+    text = str(name or "")
+    lowered = text.lower()
+    for ext in MEDIA_EXTENSIONS:
+        if lowered.endswith(ext):
+            return text[: -len(ext)]
+    return text
+
+
+def normalize_stem(text: str) -> str:
+    """Compare file names and episode titles without case or spacing noise."""
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+_UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_title(title: str, limit: int = 150) -> str:
+    """Turn a page title into a single, portable filename component."""
+    text = _UNSAFE_FILENAME.sub("-", str(title or ""))
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    if len(text) > limit:
+        text = text[:limit].rstrip(" .")
+    return text
+
+
 def archive_tag(url: str) -> str:
     """Return the extractor-style tag used on the archive line."""
     if is_youtube(url):

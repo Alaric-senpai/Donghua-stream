@@ -634,12 +634,10 @@ class MainWindow(QMainWindow):
 
         def _sync() -> None:
             try:
+                # Reconcile against the folder: finished files (and archive
+                # lines written only after verified successes) mark episodes
+                # downloaded; anything else falls back to pending.
                 db.sync_series_with_archive(int(task.series_id))
-                eps = db.get_episodes(int(task.series_id))
-                arch = db.get_archive_downloaded_ids(task.save_dir)
-                for e in eps:
-                    if e["video_id"] in arch:
-                        db.mark_episode_status(int(task.series_id), e["video_id"], "downloaded")
             except Exception:
                 pass
         self.run_db(_sync, _mark)

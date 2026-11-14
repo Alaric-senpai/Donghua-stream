@@ -12,7 +12,10 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import RealDictCursor
 
 import app_config
-from media_ids import archive_tag_for_id, extract_video_id
+from media_ids import (
+    MEDIA_EXTENSIONS, extract_video_id,
+    is_intermediate_media_name, media_stem, normalize_stem, safe_title,
+)
 
 
 def get_db_config() -> Dict[str, Any]:
@@ -150,7 +153,8 @@ def get_archive_downloaded_ids(save_dir: str) -> set:
 # Download archive maintenance
 # ==============================================================================
 
-MEDIA_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov", ".m4v")
+# A finished episode is never a work-in-progress file and never a stub.
+MIN_MEDIA_BYTES = 64 * 1024
 
 
 def _valid_video_id(video_id: Any) -> bool:
@@ -159,50 +163,71 @@ def _valid_video_id(video_id: Any) -> bool:
 
 
 def _media_files(save_dir: str) -> List[str]:
+    """List the *finished* media files of a folder.
+
+    Fragments (``.part``), failed merges (``.temp.webm``) and the separate
+    per-format streams yt-dlp writes before merging (``.fhls-720.mp4``) are
+    work in progress, never a downloaded episode, so they are skipped.
+    """
     try:
-        return [
-            f for f in os.listdir(save_dir)
-            if os.path.isfile(os.path.join(save_dir, f))
-            and f.lower().endswith(MEDIA_EXTENSIONS)
-            and not f.lower().endswith(".part")
-        ]
+        names = []
+        for entry in os.listdir(save_dir):
+            path = os.path.join(save_dir, entry)
+            if not os.path.isfile(path):
+                continue
+            if not entry.lower().endswith(MEDIA_EXTENSIONS):
+                continue
+            if is_intermediate_media_name(entry):
+                continue
+            try:
+                if os.path.getsize(path) < MIN_MEDIA_BYTES:
+                    continue
+            except OSError:
+                continue
+            names.append(entry)
+        return names
     except OSError:
         return []
 
 
-def _normalized_title(text: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+def _media_stems(save_dir: str) -> set:
+    """Normalised title-stems of every *finished* media file in the folder."""
+    return {normalize_stem(media_stem(name)) for name in _media_files(save_dir)}
 
 
-def _append_archive_ids(save_dir: str, ids: set) -> int:
-    """Write missing IDs into the directory archive. Returns how many were added."""
-    ids = {str(i).strip() for i in ids if _valid_video_id(i)}
-    if not ids:
-        return 0
-    existing = get_archive_downloaded_ids(save_dir)
-    missing = sorted(ids - existing)
-    if not missing:
-        return 0
-    archive_path = os.path.join(os.path.expanduser(save_dir), "downloaded.txt")
-    os.makedirs(os.path.dirname(archive_path), exist_ok=True)
-    with open(archive_path, "a", encoding="utf-8") as f:
-        for vid in missing:
-            f.write(f"{archive_tag_for_id(vid)} {vid}\n")
-    return len(missing)
+def _episode_file_stems(episodes: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Map a stored episode id to the file stem its download produces."""
+    stems: Dict[str, str] = {}
+    for ep in episodes:
+        vid = str(ep.get("video_id") or "").strip()
+        title = str(ep.get("title") or "").strip()
+        if not vid or not title:
+            continue
+        stems[vid] = normalize_stem(safe_title(title))
+    return stems
+
+
+def _episode_on_disk(ep: Dict[str, Any], stems: Dict[str, str],
+                     media_stems: set) -> bool:
+    """True when the episode's own finished file is in the folder."""
+    vid = str(ep.get("video_id") or "").strip()
+    stem = stems.get(vid)
+    if not stem:
+        return False
+    return stem in media_stems
 
 
 def repair_archives() -> Dict[str, int]:
-    """Make every existing series folder carry a usable ``downloaded.txt``.
+    """Make every existing series folder carry a ``downloaded.txt`` file.
 
-    Existing media cannot always be mapped back to a URL because older
-    downloads did not store the YouTube ID in the filename.  This function is
-    deliberately conservative: it records episodes the database already marks
-    as downloaded, matches obvious titles/episode numbers, and handles the
-    unambiguous one-episode/one-file case.  Every folder also gets an archive
-    file so future downloads never start without one.
+    That is all this does now.  Older versions also wrote episode IDs into
+    the archive from database status and fuzzy title matching, which poisoned
+    the archive: yt-dlp treated unfinished downloads as done, and every app
+    start re-added the lines a user had deleted by hand.  The archive is now
+    written only after a verified successful download, and episode statuses
+    are reconciled against the files on disk by ``sync_all_archives``.
     """
     created = 0
-    added = 0
     scanned = 0
     for series in get_all_series():
         save_dir = os.path.expanduser(str(series.get("save_dir") or ""))
@@ -210,47 +235,11 @@ def repair_archives() -> Dict[str, int]:
             continue
         scanned += 1
         archive_path = os.path.join(save_dir, "downloaded.txt")
-        existed = os.path.exists(archive_path)
-        ids = get_archive_downloaded_ids(save_dir) if existed else set()
-        found = set(ids)
-        episodes = get_episodes(int(series["id"]))
-        media = _media_files(save_dir)
-
-        for ep in episodes:
-            vid = ep.get("video_id")
-            if ep.get("status") == "downloaded" and _valid_video_id(vid):
-                found.add(str(vid))
-            if not _valid_video_id(vid):
-                continue
-            title = _normalized_title(ep.get("title"))
-            if title and len(title) >= 4:
-                if any(title in _normalized_title(name) for name in media):
-                    found.add(str(vid))
-            number = ep.get("episode_number")
-            if number and media:
-                pattern = rf"\bep(?:isode)?\s*0*{int(number)}\b"
-                if any(re.search(pattern, name, re.IGNORECASE) for name in media):
-                    found.add(str(vid))
-
-        # A single registered episode with a single media file is unambiguous.
-        if len(episodes) == 1 and len(media) == 1:
-            vid = episodes[0].get("video_id")
-            if _valid_video_id(vid):
-                found.add(str(vid))
-
-        # Do not guess when several episodes and several files exist: sorted
-        # filenames do not reliably correspond to catalog order, and marking
-        # the wrong episode downloaded would silently skip it forever.
-
-        if not existed:
-            os.makedirs(save_dir, exist_ok=True)
+        if not os.path.exists(archive_path):
             with open(archive_path, "a", encoding="utf-8"):
                 pass
             created += 1
-        added += _append_archive_ids(save_dir, found)
-
-    return {"folders_scanned": scanned, "archives_created": created,
-            "ids_added": added}
+    return {"folders_scanned": scanned, "archives_created": created}
 
 
 def sync_existing_records() -> Dict[str, int]:
@@ -322,8 +311,10 @@ def init_db() -> Dict[str, Any]:
     import_legacy_settings_from_db()
     ensure_default_settings()
     sync_stats = sync_existing_records()
-    # Fill in archives left behind by older versions, then update every
-    # episode status from the repaired archives in one pass.
+    # Ensure every folder has an archive file (yt-dlp needs one for YouTube),
+    # then reconcile every episode status against the files actually on disk:
+    # finished files prove a download; phantom "downloaded" rows fall back to
+    # pending so a deleted record really restarts the download.
     repair_archives()
     sync_all_archives()
     return {
@@ -727,40 +718,53 @@ def mark_episode_status(series_id: int, video_id: str, status: str) -> bool:
 
 
 def sync_series_with_archive(series_id: int) -> int:
-    """Scan the series save_dir for downloaded.txt and update DB episode statuses."""
+    """Reconcile episode statuses with what is actually on disk.
+
+    A finished media file (never a ``.part`` fragment, ``.temp.webm`` merge
+    leftover, or per-format stream like ``NAME.fhls-720.mp4``) whose name
+    matches the episode title is proof of a download.  A ``downloaded.txt``
+    line counts too, because those are now only written after a verified
+    success.  Episodes marked ``downloaded`` without either piece of evidence
+    fall back to ``pending``, so deleting a bogus record really does restart
+    the download instead of being undone on the next startup.
+    """
     series = get_series(series_id)
     if not series:
         return 0
 
-    downloaded_ids = get_archive_downloaded_ids(series["save_dir"])
-    if not downloaded_ids:
+    save_dir = os.path.expanduser(str(series.get("save_dir") or ""))
+    if not save_dir or not os.path.isdir(save_dir):
+        return 0
+
+    episodes = get_episodes(series_id)
+    if not episodes:
+        return 0
+
+    archive_ids = get_archive_downloaded_ids(save_dir)
+    stems = _episode_file_stems(episodes)
+    media_stems = _media_stems(save_dir)
+
+    upgraded: List[str] = []
+    downgraded: List[str] = []
+    for ep in episodes:
+        vid = str(ep.get("video_id") or "").strip()
+        if not _valid_video_id(vid):
+            continue
+        stem = stems.get(vid)
+        has_file = bool(stem) and stem in media_stems
+        if has_file or vid in archive_ids:
+            if ep.get("status") != "downloaded":
+                upgraded.append(vid)
+        elif ep.get("status") == "downloaded":
+            downgraded.append(vid)
+
+    if not upgraded and not downgraded:
         return 0
 
     updated = 0
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE episodes
-                SET status = 'downloaded', downloaded_at = COALESCE(downloaded_at, CURRENT_TIMESTAMP)
-                WHERE series_id = %s AND video_id = ANY(%s) AND status != 'downloaded';
-                """,
-                (series_id, list(downloaded_ids)),
-            )
-            updated = cur.rowcount
-        conn.commit()
-    return updated
-
-
-def sync_all_archives() -> int:
-    """Read every series archive once and apply all status changes together."""
-    total = 0
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            for series in get_all_series():
-                ids = get_archive_downloaded_ids(series.get("save_dir", ""))
-                if not ids:
-                    continue
+            if upgraded:
                 cur.execute(
                     """
                     UPDATE episodes
@@ -769,10 +773,32 @@ def sync_all_archives() -> int:
                     WHERE series_id = %s AND video_id = ANY(%s)
                       AND status != 'downloaded';
                     """,
-                    (int(series["id"]), list(ids)),
+                    (series_id, upgraded),
                 )
-                total += cur.rowcount
+                updated += cur.rowcount
+            if downgraded:
+                cur.execute(
+                    """
+                    UPDATE episodes
+                    SET status = 'pending', downloaded_at = NULL
+                    WHERE series_id = %s AND video_id = ANY(%s)
+                      AND status = 'downloaded';
+                    """,
+                    (series_id, downgraded),
+                )
+                updated += cur.rowcount
         conn.commit()
+    return updated
+
+
+def sync_all_archives() -> int:
+    """Reconcile every series' episode statuses against its folder once."""
+    total = 0
+    for series in get_all_series():
+        try:
+            total += sync_series_with_archive(int(series["id"]))
+        except Exception:
+            continue
     return total
 
 
