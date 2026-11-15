@@ -317,6 +317,57 @@ class SourceDownloadTests(unittest.TestCase):
                 lines = [line.strip() for line in handle if line.strip()]
             self.assertEqual(lines, [f"youtube {VIDEO_ID}"])
 
+    def test_fragment_downloads_never_silently_skip_fragments(self):
+        with tempfile.TemporaryDirectory() as save_dir:
+            _events, _summary = self._run(save_dir, [VIDEO_URL])
+        # A missing fragment must abort the attempt, not get papered over.
+        self.assertIs(FakeYoutubeDL.last_params["skip_unavailable_fragments"],
+                      False)
+
+    def test_merge_failure_purges_the_corrupt_streams_then_retries(self):
+        with tempfile.TemporaryDirectory() as save_dir:
+            title = "Battle Through the Heavens - Season 5 Episode 218"
+            prefix = media_ids.safe_title(title)
+            for name, size in (
+                (f"{prefix}.fhls-720.mp4", 150_000_000),
+                (f"{prefix}.fhls-0_aac_q2-中文.mp4", 15_000_000),
+                (f"{prefix}.fhls-720.mp4.ytdl", 70),
+                (f"{prefix}.en.srt", 90_000),
+                (f"{prefix}.fhls-720.mp4.part-Frag1.part", 1_000),
+            ):
+                with open(os.path.join(save_dir, name), "wb") as h:
+                    h.write(b"x" * size)
+
+            def corrupt(ydl):
+                raise Exception(
+                    "ERROR: Postprocessing: Error opening input files: "
+                    "Invalid data found when processing input")
+
+            FakeYoutubeDL.outcomes = [corrupt, None]
+            FakeYoutubeDL.calls = []
+            FakeYoutubeDL.last_params = {}
+            engine = downloader.VideoDownloader(
+                max_retries=3, write_subs=False)
+            with mock.patch.object(downloader.yt_dlp, "YoutubeDL",
+                                   FakeYoutubeDL), \
+                    mock.patch.object(
+                        downloader.sources, "resolve_for_download",
+                        side_effect=lambda url: (
+                            self.resolved if url == SOURCE_URL else None)), \
+                    mock.patch.object(
+                        downloader.VideoDownloader,
+                        "_wait_for_retry", return_value=False):
+                summary = engine.download_urls([SOURCE_URL], save_dir)
+
+            remaining = sorted(os.listdir(save_dir))
+            # The corrupt streams and fragment state are gone; the subtitle
+            # survives, and the successful second attempt produced its file.
+            self.assertNotIn(f"{prefix}.fhls-720.mp4", remaining)
+            self.assertNotIn(f"{prefix}.fhls-720.mp4.ytdl", remaining)
+            self.assertIn(f"{prefix}.en.srt", remaining)
+            self.assertEqual(summary.success_count, 1)
+            self.assertEqual(len(FakeYoutubeDL.calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

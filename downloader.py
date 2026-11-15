@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Dict, Any, Union
 import yt_dlp
 import sources
-from media_ids import archive_tag_for_id, extract_video_id
+from media_ids import (
+    archive_tag_for_id,
+    extract_video_id,
+    is_intermediate_media_name,
+)
 
 
 # ==============================================================================
@@ -125,6 +129,49 @@ def final_output_path(info: Any) -> str:
             if path:
                 return path
     return ""
+
+
+def purge_episode_intermediates(save_dir: str, title: str) -> int:
+    """Delete an episode's in-progress download files.
+
+    After a merge/post-processing failure the downloaded streams are
+    unusable (for example an HLS file with skipped fragments that yt-dlp
+    insists is "already downloaded").  Re-merging can only fail again, so the
+    next attempt must fetch the streams from scratch.  Finished media and
+    subtitle files are left alone.
+    """
+    if not title:
+        return 0
+    prefix = safe_title(title)
+    removed = 0
+    try:
+        for name in os.listdir(os.path.expanduser(save_dir)):
+            if not name.startswith(prefix):
+                continue
+            path = os.path.join(os.path.expanduser(save_dir), name)
+            if not os.path.isfile(path):
+                continue
+            if is_intermediate_media_name(name):
+                try:
+                    os.remove(path)
+                    removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return removed
+
+
+def is_postprocess_error(message: Any) -> bool:
+    """True when an error means the downloaded streams could not be merged.
+
+    These failures leave nothing resumable worth keeping; the only path
+    forward is a fresh download, so the engine purges the intermediate files.
+    """
+    text = str(message or "").lower()
+    return ("postprocessing" in text
+            or "conversion failed" in text
+            or "invalid data found when processing input" in text)
 
 
 # ==============================================================================
@@ -416,6 +463,13 @@ class VideoDownloader:
             "extractor_retries": 3,
             "file_access_retries": 3,
             "socket_timeout": 30,
+            # Never ship a file with holes in it.  yt-dlp's default skips
+            # fragments that fail even after their retries and then reports
+            # the download as "complete" — the result plays broken and can
+            # poison the cache for every later attempt.  A missing fragment
+            # must abort the attempt; the outer retry loop (and fragment
+            # resume) takes over instead.
+            "skip_unavailable_fragments": False,
             # Prevent Unicode characters in intermediate filenames that
             # break ffmpeg's merge step (e.g. Chinese track names like
             # "fhls-0_aac_q2-中文.mp4").
@@ -486,16 +540,18 @@ class VideoDownloader:
                     self._reset_format_progress()
                     attempt_opts = ydl_opts
                     media_url = clean_url
+                    resolved_title = ""
                     resolved = sources.resolve_for_download(clean_url)
                     if resolved:
                         media_url = resolved["url"]
+                        resolved_title = resolved.get("title") or ""
                         attempt_opts = dict(ydl_opts)
                         # The archive must key off the stable source page URL,
                         # never the transient CDN/extractor ID that the site
                         # happens to embed today.
                         attempt_opts.pop("download_archive", None)
                         attempt_opts["outtmpl"] = output_template(
-                            save_dir, resolved.get("title") or "")
+                            save_dir, resolved_title)
                         # The resolved streams pick their own merge container.
                         # Forcing the user's container here breaks real
                         # downloads: Dailymotion serves AV1 video with AAC
@@ -545,6 +601,21 @@ class VideoDownloader:
                         self._notify("cancelled", url=clean_url,
                                      index=index, total=len(urls))
                         return summary
+                    # A merge/post-processing failure means the downloaded
+                    # streams are unusable.  Purging them lets the next
+                    # attempt re-download fresh instead of re-merging the
+                    # same corrupt file in a loop.
+                    if resolved_title and is_postprocess_error(last_err):
+                        purged = purge_episode_intermediates(save_dir, resolved_title)
+                        if purged:
+                            self._notify(
+                                "purged",
+                                url=clean_url,
+                                title=resolved_title,
+                                removed=purged,
+                                index=index,
+                                total=len(urls),
+                            )
                     # An exception from one attempt is not a final failure:
                     # yt-dlp may have already tried alternative clients and
                     # the outer retry loop is still going.  Only emit
