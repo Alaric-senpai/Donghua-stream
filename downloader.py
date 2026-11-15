@@ -496,6 +496,13 @@ class VideoDownloader:
                         attempt_opts.pop("download_archive", None)
                         attempt_opts["outtmpl"] = output_template(
                             save_dir, resolved.get("title") or "")
+                        # The resolved streams pick their own merge container.
+                        # Forcing the user's container here breaks real
+                        # downloads: Dailymotion serves AV1 video with AAC
+                        # audio, and ffmpeg refuses to mux AAC into a forced
+                        # webm target ("Conversion failed!").  mp4/mkv lets
+                        # yt-dlp choose a container that holds the codecs.
+                        attempt_opts["merge_output_format"] = "mp4/mkv"
                         self._notify(
                             "source",
                             url=clean_url,

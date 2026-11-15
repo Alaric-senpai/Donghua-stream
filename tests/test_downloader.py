@@ -277,6 +277,10 @@ class SourceDownloadTests(unittest.TestCase):
             self.assertNotIn("download_archive", FakeYoutubeDL.last_params)
             self.assertIn("Battle Through the Heavens - Season 5 Episode 218",
                           FakeYoutubeDL.last_params["outtmpl"])
+            # Dailymotion serves AV1+AAC; a forced webm container cannot hold
+            # AAC, so resolved downloads must let yt-dlp pick mp4/mkv.
+            self.assertEqual(FakeYoutubeDL.last_params["merge_output_format"],
+                             "mp4/mkv")
             self.assertEqual(summary.success_count, 1)
             self.assertEqual(len(
                 [data for name, data in events if name == "source"]), 1)
@@ -304,6 +308,9 @@ class SourceDownloadTests(unittest.TestCase):
 
             self.assertEqual(FakeYoutubeDL.calls[0][0], VIDEO_URL)
             self.assertIn("download_archive", FakeYoutubeDL.last_params)
+            # The user's container choice still governs plain YouTube runs.
+            self.assertEqual(FakeYoutubeDL.last_params["merge_output_format"],
+                             "mp4")
             self.assertEqual(summary.success_count, 1)
             with open(os.path.join(save_dir, "downloaded.txt"),
                       encoding="utf-8") as handle:
